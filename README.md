@@ -8,28 +8,81 @@
 - раздел FAQ и сбор отзывов;
 - админ-панель с экспортом заказов, статистикой и переключением режима ценообразования.
 
-## Быстрый старт
+## Быстрый старт (локально)
 
-1. Установите зависимости:
-
-   ```bash
-   pip install -r requirements.txt
-   ```
-
-2. Создайте файл `.env` рядом с `bot.py` и укажите переменные:
-
-   ```env
-   TELEGRAM_BOT_TOKEN=ваш_токен_бота
-   ADMIN_CHAT_ID=ваш_telegram_id
-   ```
-
-3. Запустите бота:
+1. Скопируйте `.env.example` в `.env` и укажите реальные значения:
 
    ```bash
-   python bot.py
+   cp .env.example .env
+   # отредактируйте файл и впишите TELEGRAM_BOT_TOKEN и ADMIN_CHAT_ID
+   ```
+
+2. Установите зависимости через подготовленный скрипт (создает виртуальное окружение `venv/`):
+
+   ```bash
+   ./scripts/install.sh
+   ```
+
+3. Запустите бота из виртуального окружения:
+
+   ```bash
+   ./scripts/run.sh
    ```
 
 Бот автоматически создаст служебные директории `data/`, `logs/` и `clients/`, сохранит данные о ценах, заказах и логах в JSON и будет писать технические сообщения в `logs/bot.log`.
+
+## Что загрузить на сервер
+
+Передача файлов через SFTP/FTP (например, FileZilla) сводится к загрузке директории проекта. Минимальный набор:
+
+- `bot.py` — основной код бота;
+- `requirements.txt` — список зависимостей;
+- `scripts/install.sh` и `scripts/run.sh` — автоматическая установка и запуск в виртуальном окружении;
+- `deploy/supervisor.conf` — конфигурация службы `supervisor` для автозапуска;
+- `.env` (на основе `.env.example`) — секреты и параметры бота.
+
+Дополнительно можно загрузить `README.md`, чтобы под рукой была инструкция.
+
+## Настройка сервера через SSH
+
+После загрузки файлов подключитесь по SSH и выполните:
+
+```bash
+cd /root/gipsr_bot
+chmod +x scripts/install.sh scripts/run.sh
+./scripts/install.sh
+```
+
+Скрипт создаст окружение `venv/` и установит зависимости. При необходимости повторите запуск после обновления `requirements.txt`.
+
+## Настройка Supervisor
+
+1. Скопируйте конфиг в систему (обновите `directory` и `command`, если путь отличается):
+
+   ```bash
+   sudo cp /root/gipsr_bot/deploy/supervisor.conf /etc/supervisor/conf.d/gipsr_bot.conf
+   ```
+
+2. Примените конфигурацию и проверьте статус:
+
+   ```bash
+   sudo supervisorctl reread
+   sudo supervisorctl update
+   sudo supervisorctl status gipsr_bot
+   ```
+
+Логи `supervisor` сохраняются в `logs/supervisor.out.log` и `logs/supervisor.err.log`, а рабочие сообщения бота — в `logs/bot.log`.
+
+## Резервный запуск вручную
+
+Для диагностики можно запускать бота напрямую:
+
+```bash
+source venv/bin/activate
+python bot.py
+```
+
+Выход из режима — `Ctrl+C`.
 
 ## Основные сценарии
 

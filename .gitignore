@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+*.log
+.env
+venv/
+data/
+logs/
+clients/
+*.sqlite3
+orders.json
+orders.xlsx
+user_logs.json
+prices.json
+*.pyc
