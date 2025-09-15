@@ -1,0 +1,17 @@
+{
+    "self": {
+        "base": 1500
+    },
+    "course_theory": {
+        "base": 7000
+    },
+    "course_empirical": {
+        "base": 11000
+    },
+    "vkr": {
+        "base": 32000
+    },
+    "master": {
+        "base": 42000
+    }
+}
