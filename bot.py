@@ -24,14 +24,35 @@ from telegram.ext import (
     filters,
 )
 
+from config import (
+    BOT_TOKEN,
+    DEFAULT_ADMIN_CHAT_ID as CONFIG_ADMIN_CHAT_ID,
+    DEFAULT_ADMIN_USERNAME,
+    DEFAULT_PRICING_MODE,
+    MANAGER_CONTACT_URL as CONFIG_MANAGER_CONTACT_URL,
+    ORDER_STATUS_TITLES,
+    WELCOME_MESSAGE,
+)
+
 load_dotenv()
 
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
-ADMIN_CHAT_ID = int(os.getenv("ADMIN_CHAT_ID", "0"))
+TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or BOT_TOKEN or "").strip()
+
+admin_id_env = os.getenv("ADMIN_CHAT_ID")
+try:
+    ADMIN_CHAT_ID_DEFAULT = (
+        int(admin_id_env) if admin_id_env is not None else int(CONFIG_ADMIN_CHAT_ID)
+    )
+except ValueError:
+    ADMIN_CHAT_ID_DEFAULT = int(CONFIG_ADMIN_CHAT_ID)
+
+MANAGER_CONTACT_LINK = (
+    os.getenv("MANAGER_CONTACT") or CONFIG_MANAGER_CONTACT_URL or ""
+).strip() or CONFIG_MANAGER_CONTACT_URL
 
 if not TELEGRAM_BOT_TOKEN:
     raise RuntimeError(
-        "TELEGRAM_BOT_TOKEN is not set. Create a .env file with TELEGRAM_BOT_TOKEN=<token>."
+        "TELEGRAM_BOT_TOKEN is not configured. Проверьте .env или config.py."
     )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -168,6 +189,7 @@ class OrderRecord:
     deadline_date: str
     requirements: str
     upsells: List[str]
+    status_key: str
     price: int
     status: str
     created_at: str
@@ -175,7 +197,21 @@ class OrderRecord:
 
 class DataStore:
     def __init__(self) -> None:
-        self.settings: Dict[str, str] = self._load_json(SETTINGS_FILE, {"pricing_mode": "light"})
+        default_settings = {
+            "pricing_mode": DEFAULT_PRICING_MODE,
+            "admin_chat_id": ADMIN_CHAT_ID_DEFAULT,
+            "admin_username": DEFAULT_ADMIN_USERNAME,
+            "manager_contact_url": MANAGER_CONTACT_LINK,
+        }
+        loaded_settings = self._load_json(SETTINGS_FILE, default_settings)
+        changed = False
+        for key, value in default_settings.items():
+            if key not in loaded_settings:
+                loaded_settings[key] = value
+                changed = True
+        if changed:
+            self._save_json(SETTINGS_FILE, loaded_settings)
+        self.settings: Dict[str, object] = loaded_settings
         self.prices: Dict[str, Dict[str, int]] = self._load_json(PRICES_FILE, DEFAULT_PRICES)
         self.referrals: Dict[str, List[int]] = self._load_json(REFERRALS_FILE, {})
         self.orders: Dict[str, List[Dict[str, object]]] = self._load_json(ORDERS_FILE, {})
@@ -199,11 +235,29 @@ class DataStore:
             json.dump(data, fh, ensure_ascii=False, indent=2)
 
     def get_pricing_mode(self) -> str:
-        return self.settings.get("pricing_mode", "light")
+        return self.settings.get("pricing_mode", DEFAULT_PRICING_MODE)
 
     def set_pricing_mode(self, mode: str) -> None:
         self.settings["pricing_mode"] = mode
         self._save_json(SETTINGS_FILE, self.settings)
+
+    def get_admin_chat_id(self) -> int:
+        try:
+            return int(self.settings.get("admin_chat_id", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def set_admin_chat_id(self, chat_id: int, username: Optional[str] = None) -> None:
+        self.settings["admin_chat_id"] = int(chat_id)
+        if username is not None:
+            self.settings["admin_username"] = username or ""
+        self._save_json(SETTINGS_FILE, self.settings)
+
+    def get_admin_username(self) -> str:
+        return str(self.settings.get("admin_username", "") or "")
+
+    def get_manager_contact(self) -> str:
+        return str(self.settings.get("manager_contact_url", MANAGER_CONTACT_LINK))
 
     def add_referral(self, referrer_id: int, new_user_id: int) -> bool:
         referrer_key = str(referrer_id)
@@ -247,6 +301,25 @@ class DataStore:
     def get_orders(self, user_id: int) -> List[Dict[str, object]]:
         return self.orders.get(str(user_id), [])
 
+    def get_order(self, user_id: int, order_id: int) -> Optional[Dict[str, object]]:
+        orders = self.orders.get(str(user_id))
+        if not orders:
+            return None
+        for order in orders:
+            if int(order.get("order_id", 0)) == int(order_id):
+                return order
+        return None
+
+    def list_recent_orders(self, limit: int = 10) -> List[Dict[str, object]]:
+        entries: List[Dict[str, object]] = []
+        for user_id, orders in self.orders.items():
+            for order in orders:
+                combined = {"user_id": int(user_id)}
+                combined.update(order)
+                entries.append(combined)
+        entries.sort(key=lambda item: item.get("created_at", ""), reverse=True)
+        return entries[:limit]
+
     def total_spent(self, user_id: int) -> int:
         return int(sum(int(order.get("price", 0)) for order in self.get_orders(user_id)))
 
@@ -269,7 +342,15 @@ class DataStore:
         orders_flat = [order for orders in self.orders.values() for order in orders]
         total_orders = len(orders_flat)
         total_revenue = int(sum(int(order.get("price", 0)) for order in orders_flat))
-        active_orders = sum(1 for order in orders_flat if order.get("status", "").lower() not in {"готов", "завершен"})
+        active_orders = 0
+        for order in orders_flat:
+            status_key = str(order.get("status_key", "")).lower()
+            status_text = str(order.get("status", "")).lower()
+            if status_key in {"done"}:
+                continue
+            if any(word in status_text for word in ("готов", "заверш")):
+                continue
+            active_orders += 1
         unique_users = len(self.orders)
         return {
             "orders": total_orders,
@@ -277,6 +358,20 @@ class DataStore:
             "active": active_orders,
             "users": unique_users,
         }
+
+    def update_order_status(
+        self, user_id: int, order_id: int, status_key: str, status_title: str
+    ) -> Optional[Dict[str, object]]:
+        orders = self.orders.get(str(user_id))
+        if not orders:
+            return None
+        for order in orders:
+            if int(order.get("order_id", 0)) == int(order_id):
+                order["status_key"] = status_key
+                order["status"] = status_title
+                self._save_json(ORDERS_FILE, self.orders)
+                return order
+        return None
 
 
 store = DataStore()
@@ -316,6 +411,7 @@ def calculate_price(order_type: str, days_left: int, complexity: float = 1.0, up
 
 
 def build_main_menu_keyboard() -> InlineKeyboardMarkup:
+    contact_url = store.get_manager_contact()
     keyboard = [
         [InlineKeyboardButton("📝 Сделать заказ", callback_data="main:order")],
         [
@@ -326,7 +422,7 @@ def build_main_menu_keyboard() -> InlineKeyboardMarkup:
             InlineKeyboardButton("👤 Профиль", callback_data="main:profile"),
             InlineKeyboardButton("❓ FAQ", callback_data="main:faq"),
         ],
-        [InlineKeyboardButton("📞 Администратор", url="https://t.me/Thisissaymoon")],
+        [InlineKeyboardButton("📞 Администратор", url=contact_url)],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -599,8 +695,9 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         deadline_date=deadline_date,
         requirements=str(draft.get("requirements", "")),
         upsells=list(draft.get("upsells", [])),
+        status_key="new",
         price=int(draft.get("price", 0)),
-        status="новый",
+        status=ORDER_STATUS_TITLES.get("new", "новый"),
         created_at=datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
     )
     store.add_order(user.id, order)
@@ -612,7 +709,8 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     )
     query = update.callback_query
     await query.edit_message_text(text)
-    if ADMIN_CHAT_ID:
+    admin_chat_id = store.get_admin_chat_id()
+    if admin_chat_id:
         order_type = order_type_name_from_key(order.type_key)
         admin_text = (
             f"Новый заказ #{order.order_id}\n"
@@ -623,7 +721,7 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             f"Сумма: {order.price} ₽"
         )
         try:
-            await context.bot.send_message(ADMIN_CHAT_ID, admin_text)
+            await context.bot.send_message(admin_chat_id, admin_text)
         except Exception as exc:  # pragma: no cover - depends on Telegram API
             logger.error("Failed to notify admin: %s", exc)
     return await show_main_menu(update, context, "Хотите оформить еще одну работу?")
@@ -806,10 +904,11 @@ async def receive_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     store.add_feedback(user.id, feedback)
     log_user_action(update, "feedback_left")
     await update.message.reply_text("Спасибо! Мы ценим обратную связь.")
-    if ADMIN_CHAT_ID:
+    admin_chat_id = store.get_admin_chat_id()
+    if admin_chat_id:
         try:
             await context.bot.send_message(
-                ADMIN_CHAT_ID,
+                admin_chat_id,
                 f"Новый отзыв от {user.id} ({user.username or user.full_name}):\n{feedback}",
             )
         except Exception as exc:  # pragma: no cover
@@ -848,7 +947,8 @@ async def show_faq_item(update: Update, idx: int) -> int:
 
 async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
-    if not user or user.id != ADMIN_CHAT_ID:
+    admin_chat_id = store.get_admin_chat_id()
+    if not user or user.id != admin_chat_id:
         if update.message:
             await update.message.reply_text("Админ-панель доступна только владельцу бота.")
         elif update.callback_query:
@@ -859,6 +959,7 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [InlineKeyboardButton("📋 Последние заказы", callback_data="admin:orders")],
         [InlineKeyboardButton("💰 Режим ценообразования", callback_data="admin:pricing")],
         [InlineKeyboardButton("📤 Экспорт в Excel", callback_data="admin:export")],
+        [InlineKeyboardButton("♻️ Обновить статус", callback_data="admin:status_list")],
         [InlineKeyboardButton("🗂 Последние действия", callback_data="admin:logs")],
         [InlineKeyboardButton("⬅️ Главное меню", callback_data="main:root")],
     ]
@@ -927,7 +1028,9 @@ async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return STATE_NAVIGATION
     await update.callback_query.edit_message_text("Отправляю файл с заказами…")
     try:
-        await context.bot.send_document(ADMIN_CHAT_ID, document=path.open("rb"))
+        admin_chat_id = store.get_admin_chat_id()
+        if admin_chat_id:
+            await context.bot.send_document(admin_chat_id, document=path.open("rb"))
     finally:
         path.unlink(missing_ok=True)
     await update.callback_query.edit_message_text(
@@ -953,6 +1056,98 @@ async def admin_show_logs(update: Update) -> int:
     await update.callback_query.edit_message_text(
         text, reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:menu")]])
     )
+    return STATE_NAVIGATION
+
+
+async def admin_list_status_targets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    records = store.list_recent_orders(limit=12)
+    if not records:
+        await update.callback_query.edit_message_text(
+            "Заказов пока нет.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:menu")]]),
+        )
+        return STATE_NAVIGATION
+    keyboard: List[List[InlineKeyboardButton]] = []
+    for record in records:
+        order_id = int(record.get("order_id", 0))
+        user_id = int(record.get("user_id", 0))
+        name = order_type_name_from_record(record)
+        status_key = str(record.get("status_key", "")) or "new"
+        status_label = record.get("status") or ORDER_STATUS_TITLES.get(status_key, "—")
+        label = f"#{order_id} — {name} ({status_label})"
+        if len(label) > 60:
+            label = label[:57] + "…"
+        callback = f"admin:status_select:{user_id}:{order_id}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=callback)])
+    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin:menu")])
+    await update.callback_query.edit_message_text(
+        "Выберите заказ, чтобы обновить статус:",
+        reply_markup=InlineKeyboardMarkup(keyboard),
+    )
+    return STATE_NAVIGATION
+
+
+async def admin_select_status(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, order_id: int
+) -> int:
+    context.user_data["admin_status_target"] = {"user_id": user_id, "order_id": order_id}
+    record = store.get_order(user_id, order_id)
+    if record is None:
+        # Запросили несуществующий заказ, возвращаемся к списку.
+        context.user_data.pop("admin_status_target", None)
+        await update.callback_query.edit_message_text(
+            "Заказ не найден. Возможно, он был удален.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:status_list")]]),
+        )
+        return STATE_NAVIGATION
+    original_status_key = str(record.get("status_key", "new") or "new")
+    original_status_title = record.get("status") or ORDER_STATUS_TITLES.get(original_status_key, "—")
+    order_name = order_type_name_from_record(record)
+    keyboard = [
+        [InlineKeyboardButton(title, callback_data=f"admin:status_apply:{key}")]
+        for key, title in ORDER_STATUS_TITLES.items()
+    ]
+    keyboard.append([InlineKeyboardButton("⬅️ Назад", callback_data="admin:status_list")])
+    text = (
+        f"Заказ #{order_id} — {order_name}\n"
+        f"Текущий статус: {original_status_title}\n"
+        "Выберите новый статус:"
+    )
+    await update.callback_query.edit_message_text(
+        text, reply_markup=InlineKeyboardMarkup(keyboard)
+    )
+    return STATE_NAVIGATION
+
+
+async def admin_apply_status(
+    update: Update, context: ContextTypes.DEFAULT_TYPE, status_key: str
+) -> int:
+    target = context.user_data.get("admin_status_target")
+    if not target:
+        return await admin_list_status_targets(update, context)
+    user_id = int(target.get("user_id", 0))
+    order_id = int(target.get("order_id", 0))
+    status_title = ORDER_STATUS_TITLES.get(status_key, status_key)
+    record = store.update_order_status(user_id, order_id, status_key, status_title)
+    if not record:
+        await update.callback_query.edit_message_text(
+            "Не удалось обновить статус (заказ не найден).",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Назад", callback_data="admin:status_list")]]),
+        )
+        return STATE_NAVIGATION
+    log_user_action(update, f"admin_status:{order_id}:{status_key}")
+    await update.callback_query.edit_message_text(
+        f"Статус заказа #{order_id} обновлен: {status_title}",
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ В меню", callback_data="admin:menu")]]),
+    )
+    try:
+        await context.bot.send_message(
+            user_id,
+            f"Статус вашего заказа #{order_id}: {status_title}",
+        )
+    except Exception as exc:  # pragma: no cover - зависит от Telegram API
+        logger.warning("Could not notify user %s about status change: %s", user_id, exc)
+    context.user_data.pop("admin_status_target", None)
     return STATE_NAVIGATION
 
 
@@ -1039,6 +1234,18 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return await admin_export(update, context)
     if data == "admin:logs":
         return await admin_show_logs(update)
+    if data == "admin:status_list":
+        return await admin_list_status_targets(update, context)
+    if data.startswith("admin:status_select:"):
+        try:
+            _, _, user_str, order_str = data.split(":", maxsplit=3)
+            return await admin_select_status(update, context, int(user_str), int(order_str))
+        except (ValueError, IndexError):
+            await update.callback_query.answer("Не удалось распознать заказ", show_alert=True)
+            return STATE_NAVIGATION
+    if data.startswith("admin:status_apply:"):
+        status_key = data.split(":", maxsplit=2)[2]
+        return await admin_apply_status(update, context, status_key)
     await query.edit_message_text("Команда не распознана. Возвращаюсь в меню.")
     return await show_main_menu(update, context)
 
@@ -1046,15 +1253,24 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     log_user_action(update, "start")
     user = update.effective_user
     context.user_data.pop("order_draft", None)
+    promoted_text = ""
+    admin_chat_id = store.get_admin_chat_id()
+    if user and admin_chat_id == 0:
+        store.set_admin_chat_id(user.id, user.username or user.full_name or "")
+        admin_chat_id = user.id
+        promoted_text = (
+            "\n\nВы назначены администратором бота. Используйте /admin для управления заказами."
+        )
     if context.args:
         payload = context.args[0]
         if payload.isdigit():
             referrer_id = int(payload)
             if referrer_id != user.id and store.add_referral(referrer_id, user.id):
-                if ADMIN_CHAT_ID:
+                admin_id = store.get_admin_chat_id()
+                if admin_id:
                     try:
                         await context.bot.send_message(
-                            ADMIN_CHAT_ID,
+                            admin_id,
                             f"Новый реферал: {user.id} (пригласил {referrer_id})",
                         )
                     except Exception as exc:  # pragma: no cover
@@ -1063,6 +1279,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         f"👋 Привет, {html.escape(user.first_name or user.full_name or 'друг')}!\n\n"
         "Я помогу оформить любую учебную работу: от самостоятельной до магистерской."
     )
+    if WELCOME_MESSAGE:
+        greeting += f"\n{WELCOME_MESSAGE}"
+    if promoted_text:
+        greeting += promoted_text
     if update.message:
         await update.message.reply_text(greeting)
     return await show_main_menu(update, context, "Готовы сделать заказ?")
@@ -1083,9 +1303,10 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled error: %s", context.error)
-    if ADMIN_CHAT_ID:
+    admin_chat_id = store.get_admin_chat_id()
+    if admin_chat_id:
         try:
-            await context.bot.send_message(ADMIN_CHAT_ID, f"Ошибка в боте: {context.error}")
+            await context.bot.send_message(admin_chat_id, f"Ошибка в боте: {context.error}")
         except Exception:  # pragma: no cover
             pass
 
