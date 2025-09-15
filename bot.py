@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import json
 import logging
@@ -378,6 +379,17 @@ store = DataStore()
 
 
 STATE_NAVIGATION, STATE_ORDER_TOPIC, STATE_ORDER_REQUIREMENTS, STATE_FEEDBACK, STATE_ADMIN = range(5)
+
+
+def schedule_restart(delay: float = 1.5) -> None:
+    loop = asyncio.get_running_loop()
+
+    def _shutdown() -> None:
+        logger.warning("Stopping bot process by admin request")
+        os._exit(0)
+
+    loop.call_later(delay, _shutdown)
+
 
 def log_user_action(update: Update, action: str) -> None:
     user = update.effective_user
@@ -961,6 +973,7 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         [InlineKeyboardButton("📤 Экспорт в Excel", callback_data="admin:export")],
         [InlineKeyboardButton("♻️ Обновить статус", callback_data="admin:status_list")],
         [InlineKeyboardButton("🗂 Последние действия", callback_data="admin:logs")],
+        [InlineKeyboardButton("🔄 Перезапустить бота", callback_data="admin:restart")],
         [InlineKeyboardButton("⬅️ Главное меню", callback_data="main:root")],
     ]
     text = "🔐 Админ-панель. Выберите действие:"
@@ -968,6 +981,27 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.callback_query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    return STATE_NAVIGATION
+
+
+async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    user = update.effective_user
+    admin_chat_id = store.get_admin_chat_id()
+    if not user or user.id != admin_chat_id:
+        if update.message:
+            await update.message.reply_text("Команда доступна только администратору.")
+        elif update.callback_query:
+            await update.callback_query.answer("Нет доступа", show_alert=True)
+        return STATE_NAVIGATION
+    source = "callback" if update.callback_query else "command"
+    notify_text = "Перезапускаю бота. Он вернётся через несколько секунд."
+    if update.callback_query:
+        await update.callback_query.answer("Перезапускаю…")
+        await context.bot.send_message(chat_id=user.id, text=notify_text)
+    elif update.message:
+        await update.message.reply_text(notify_text)
+    logger.warning("Restart requested by admin %s via %s", user.id, source)
+    schedule_restart()
     return STATE_NAVIGATION
 
 
@@ -1234,6 +1268,8 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
         return await admin_export(update, context)
     if data == "admin:logs":
         return await admin_show_logs(update)
+    if data == "admin:restart":
+        return await restart_bot(update, context)
     if data == "admin:status_list":
         return await admin_list_status_targets(update, context)
     if data.startswith("admin:status_select:"):
@@ -1341,6 +1377,7 @@ def build_application():
     application.add_handler(conv_handler)
     application.add_handler(CommandHandler("help", help_command))
     application.add_handler(CommandHandler("admin", admin_command))
+    application.add_handler(CommandHandler("restart_bot", restart_bot))
     application.add_error_handler(error_handler)
     return application
 

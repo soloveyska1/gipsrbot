@@ -9,6 +9,7 @@ fi
 APP_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 LOG_DIR="$APP_DIR/logs"
 LOG_FILE="$LOG_DIR/autodeploy.log"
+ENV_FILE="$APP_DIR/.env"
 
 mkdir -p "$LOG_DIR"
 
@@ -31,6 +32,16 @@ if command -v apt-get >/dev/null 2>&1; then
   apt-get install -y python3 python3-venv python3-pip systemd >>"$LOG_FILE" 2>&1
 else
   log "apt-get не найден. Предполагаем, что зависимости уже установлены."
+fi
+
+if [[ ! -f "$ENV_FILE" ]]; then
+  log "Файл .env не найден. Загрузите его вместе с проектом и повторите установку."
+  exit 1
+fi
+
+if grep -Eq 'PASTE_TELEGRAM_BOT_TOKEN_HERE|REPLACE_ME|0000000000' "$ENV_FILE"; then
+  log "В .env все еще стоит шаблон TELEGRAM_BOT_TOKEN. Замените его на реальный токен бота."
+  exit 1
 fi
 
 log "Создаем виртуальное окружение и ставим зависимости..."
@@ -62,7 +73,7 @@ systemctl restart gipsrbot.service
 
 log "Текущий статус службы:"
 systemctl status gipsrbot.service --no-pager >>"$LOG_FILE" 2>&1 || true
-systemctl status gipsrbot.service --no-pager
+systemctl status gipsrbot.service --no-pager || true
 
 log "Последние строки журнала сервиса:"
 journalctl -u gipsrbot.service -n 20 --no-pager || true
