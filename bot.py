@@ -276,7 +276,11 @@ async def select_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return await main_menu(update, context)
     text = "Выберите тип работы (добавьте несколько в корзину для скидки!):"
     keyboard = [[InlineKeyboardButton(f"{val['icon']} {val['name']}", callback_data=f'type_{key}')] for key, val in ORDER_TYPES.items()]
-    keyboard.append([InlineKeyboardButton("⬅️ Меню", callback_data='back_to_main')])
+    navigation_row = [InlineKeyboardButton("⬅️ Меню", callback_data='back_to_main')]
+    current_type = context.user_data.get('current_order_type')
+    if current_type in ORDER_TYPES:
+        navigation_row.append(InlineKeyboardButton("🔙 К описанию", callback_data=f'type_{current_type}'))
+    keyboard.append(navigation_row)
     reply_markup = InlineKeyboardMarkup(keyboard)
     try:
         await query.edit_message_text(text, reply_markup=reply_markup)
