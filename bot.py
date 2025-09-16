@@ -967,7 +967,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"📲 Поделитесь ссылкой для бонусов: {ref_link}\n"
         f"🎁 Бонусный баланс: {bonus_balance}₽"
     )
-    await main_menu(update, context, welcome)
+    return await main_menu(update, context, welcome)
 
 # Главное меню
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message=None):
@@ -1019,12 +1019,15 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Выбор типа заказа
 async def select_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data if query else None
     user = update.effective_user
     log_user_action(user.id, user.username, "Выбор типа заказа")
+    if data and data.startswith('type_'):
+        return await view_order_details(update, context)
     if data == 'back_to_main':
         return await main_menu(update, context)
+    if query:
+        await query.answer()
     text = "Выберите тип работы (добавьте несколько в корзину для скидки!):"
     keyboard = [[InlineKeyboardButton(f"{val['icon']} {val['name']}", callback_data=f'type_{key}')] for key, val in ORDER_TYPES.items()]
     keyboard.append([InlineKeyboardButton("⬅️ Меню", callback_data='back_to_main')])
@@ -1382,8 +1385,11 @@ async def handle_bonus_amount_message(update: Update, context: ContextTypes.DEFA
 # Показ прайс-листа
 async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    data = query.data
+    data = query.data if query else ''
+    if data.startswith('type_'):
+        return await view_order_details(update, context)
+    if query:
+        await query.answer()
     if data.startswith('price_detail_'):
         key = data[13:]
         val = ORDER_TYPES.get(key, {})
@@ -1418,8 +1424,11 @@ async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Калькулятор цен
 async def price_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    data = query.data
+    data = query.data if query else ''
+    if data.startswith('type_'):
+        return await view_order_details(update, context)
+    if query:
+        await query.answer()
     if data.startswith('calc_type_'):
         key = data[10:]
         context.user_data['calc_type'] = key
@@ -1444,8 +1453,13 @@ async def price_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def calc_select_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    data = query.data
+    data = query.data if query else ''
+    if data.startswith('type_'):
+        return await view_order_details(update, context)
+    if data == 'price_calculator':
+        return await price_calculator(update, context)
+    if query:
+        await query.answer()
     if data.startswith('calc_dead_'):
         days = int(data[10:])
         context.user_data['calc_days'] = days
@@ -1453,7 +1467,7 @@ async def calc_select_deadline(update: Update, context: ContextTypes.DEFAULT_TYP
         keyboard = [
             [InlineKeyboardButton("Простая (базовая)", callback_data='calc_comp_1.0')],
             [InlineKeyboardButton("Средняя (+10%)", callback_data='calc_comp_1.1'), InlineKeyboardButton("Сложная (+30%)", callback_data='calc_comp_1.3')],
-            [InlineKeyboardButton("Назад", callback_data=f'calc_type_{context.user_data["calc_type"]}')]
+            [InlineKeyboardButton("Назад", callback_data='price_calculator')]
         ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return SELECT_CALC_COMPLEXITY
@@ -1461,8 +1475,13 @@ async def calc_select_deadline(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def calc_select_complexity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
-    data = query.data
+    data = query.data if query else ''
+    if data.startswith('type_'):
+        return await view_order_details(update, context)
+    if data.startswith('calc_type_'):
+        return await price_calculator(update, context)
+    if query:
+        await query.answer()
     if data.startswith('calc_comp_'):
         comp = float(data[10:])
         key = context.user_data.get('calc_type')
