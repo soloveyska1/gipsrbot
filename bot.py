@@ -216,7 +216,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"👋 Добро пожаловать, {user.first_name}! Работаем со всеми дисциплинами, кроме технических (чертежи)."
         f" Уже 5000+ клиентов и 10% скидка на первый заказ 🔥\nПоделитесь ссылкой для бонусов: {ref_link}"
     )
-    await main_menu(update, context, welcome)
+    return await main_menu(update, context, welcome)
 
 # Главное меню
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message=None):
@@ -272,6 +272,8 @@ async def select_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     data = query.data if query else None
     user = update.effective_user
     log_user_action(user.id, user.username, "Выбор типа заказа")
+    if data and data.startswith('type_'):
+        return await view_order_details(update, context)
     if data == 'back_to_main':
         return await main_menu(update, context)
     text = "Выберите тип работы (добавьте несколько в корзину для скидки!):"
@@ -647,6 +649,8 @@ async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN, reply_markup=InlineKeyboardMarkup(keyboard))
         return SHOW_PRICE_LIST
+    elif data.startswith('type_'):
+        return await view_order_details(update, context)
     elif data == 'price_calculator':
         return await price_calculator(update, context)
     elif data == 'back_to_main':
@@ -668,6 +672,8 @@ async def price_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await answer_callback_query(query, context)
     data = query.data
+    if data.startswith('type_'):
+        return await view_order_details(update, context)
     if data.startswith('calc_type_'):
         key = data[10:]
         context.user_data['calc_type'] = key
