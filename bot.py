@@ -3,6 +3,7 @@ import sys
 import logging
 import json
 from datetime import datetime, timedelta
+from html import escape
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes,
@@ -73,6 +74,52 @@ ORDERS = load_json(ORDERS_FILE)
 FEEDBACKS = load_json(FEEDBACKS_FILE)
 USER_LOGS = load_json(USER_LOGS_FILE)
 
+def format_contact_link(contact: str) -> str:
+    if not contact:
+        return 'не указан'
+    contact = contact.strip()
+    if not contact:
+        return 'не указан'
+    safe_display = escape(contact)
+    if contact.startswith('@') and len(contact) > 1:
+        username = contact[1:].split()[0]
+        if username and all(ch.isalnum() or ch == '_' for ch in username):
+            href = escape(f"https://t.me/{username}", quote=True)
+            display = escape(f"@{username}")
+            return f'<a href="{href}">{display}</a>'
+    lower_contact = contact.lower()
+    if lower_contact.startswith('http://') or lower_contact.startswith('https://'):
+        href = escape(contact, quote=True)
+        return f'<a href="{href}">{safe_display}</a>'
+    if '@' in contact and ' ' not in contact and not contact.startswith('@'):
+        href = escape(f"mailto:{contact}", quote=True)
+        return f'<a href="{href}">{safe_display}</a>'
+    return safe_display
+
+def build_order_details(uid: str, order: dict) -> str:
+    order_id = order.get('order_id', 'N/A')
+    order_name = ORDER_TYPES.get(order.get('type'), {}).get('name', order.get('type', 'Неизвестно'))
+    user_link = escape(f"tg://user?id={uid}", quote=True)
+    lines = [
+        f"<b>Заказ #{order_id}</b>",
+        f"Пользователь: <a href=\"{user_link}\">{escape(str(uid))}</a>",
+        f"Тип: {escape(order_name)}",
+        f"Тема: {escape(order.get('topic', 'Без темы'))}",
+        f"Срок: {order.get('deadline_days', 'N/A')} дней",
+        f"Статус: {escape(order.get('status', 'неизвестно'))}",
+        f"Контакт: {format_contact_link(order.get('contact'))}",
+        f"Требования: {escape(order.get('requirements', 'Нет'))}",
+    ]
+    if order.get('upsells'):
+        upsells_readable = ', '.join(UPSELL_TITLES.get(code, code) for code in order['upsells'])
+        lines.append(f"Допы: {escape(upsells_readable)}")
+    else:
+        lines.append("Допы: нет")
+    lines.append(f"Файлов: {len(order.get('attachments') or [])}")
+    if order.get('created_at'):
+        lines.append(f"Создан: {escape(order['created_at'])}")
+    return '<br>'.join(lines)
+
 ORDER_TYPES = {
     'samostoyatelnye': {
         'name': 'Самостоятельные, контрольные, эссе',
@@ -84,8 +131,8 @@ ORDER_TYPES = {
     'kursovaya_teoreticheskaya': {
         'name': 'Курсовая теоретическая',
         'icon': '📘',
-        'description': 'Глубокий анализ литературы. Получите отличную оценку без стресса! 📈',
-        'details': 'Теоретическая основа, анализ источников, структура по ГОСТ.',
+        'description': 'Глубокий анализ литературы и теории. Получите отличную оценку без стресса! 📈',
+        'details': 'Теоретическая основа, аналитика источников и четкая структура по ГОСТ.',
         'examples': ['Теория маркетинга', 'Обзор психологии развития']
     },
     'kursovaya_s_empirikov': {
@@ -111,6 +158,11 @@ ORDER_TYPES = {
     }
 }
 
+UPSELL_TITLES = {
+    'prez': 'Презентация',
+    'speech': 'Речь'
+}
+
 FAQ_ITEMS = [
     {'question': 'Как сделать заказ?', 'answer': 'Выберите "Сделать заказ" и следуйте шагам. Можно заказать несколько работ сразу!'},
     {'question': 'Как рассчитывается стоимость?', 'answer': 'Зависит от типа, срочности и сложности. Используйте калькулятор для точной цены!'},
@@ -123,7 +175,7 @@ FAQ_ITEMS = [
 current_pricing_mode = 'light'
 
 # Состояния
-SELECT_MAIN_MENU, SELECT_ORDER_TYPE, VIEW_ORDER_DETAILS, INPUT_TOPIC, SELECT_DEADLINE, INPUT_REQUIREMENTS, ADD_UPSSELL, ADD_ANOTHER_ORDER, CONFIRM_CART, ADMIN_MENU, PROFILE_MENU, SHOW_PRICE_LIST, PRICE_CALCULATOR, SELECT_CALC_DEADLINE, SELECT_CALC_COMPLEXITY, SHOW_FAQ, FAQ_DETAILS, SHOW_ORDERS, LEAVE_FEEDBACK, INPUT_FEEDBACK = range(20)
+SELECT_MAIN_MENU, SELECT_ORDER_TYPE, VIEW_ORDER_DETAILS, INPUT_TOPIC, SELECT_DEADLINE, INPUT_REQUIREMENTS, UPLOAD_FILES, INPUT_CONTACT, ADD_UPSSELL, ADD_ANOTHER_ORDER, CONFIRM_CART, ADMIN_MENU, PROFILE_MENU, SHOW_PRICE_LIST, PRICE_CALCULATOR, SELECT_CALC_DEADLINE, SELECT_CALC_COMPLEXITY, SHOW_FAQ, FAQ_DETAILS, SHOW_ORDERS, LEAVE_FEEDBACK, INPUT_FEEDBACK = range(22)
 
 # Логирование действий пользователя
 def log_user_action(user_id, username, action):
@@ -131,6 +183,19 @@ def log_user_action(user_id, username, action):
     USER_LOGS.setdefault(str(user_id), []).append({'timestamp': timestamp, 'action': action, 'username': username})
     save_json(USER_LOGS_FILE, USER_LOGS)
     logger.info(f"Пользователь {user_id} ({username}): {action}")
+
+async def answer_callback(query):
+    """Безопасно отвечает на callback-запрос, чтобы избежать ошибок повторного ответа."""
+    if not query:
+        return
+    try:
+        await query.answer()
+    except TelegramError as exc:
+        error_text = str(exc).lower()
+        if "query is too old" in error_text or "query id is invalid" in error_text:
+            logger.debug("Callback уже обработан: %s", exc)
+        else:
+            raise
 
 # Расчет цены
 def calculate_price(order_type_key, days_left, complexity_factor=1.0):
@@ -171,7 +236,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             REFERALS.setdefault(str(referrer_id), []).append(user.id)
             save_json(REFERRALS_FILE, REFERALS)
             await context.bot.send_message(referrer_id, f"🎉 Новый реферал: {user.first_name}")
-    welcome = f"👋 Добро пожаловать, {user.first_name}! Заказывайте работы. Уже 5000+ клиентов! 10% скидка на первый заказ 🔥\nПоделитесь ссылкой для бонусов: {ref_link}"
+    welcome = (
+        f"👋 Добро пожаловать, {user.first_name}! Работаем со всеми учебными работами, "
+        "кроме технических дисциплин с чертежами. Уже 5000+ клиентов и более 6 лет опыта! 10% скидка на первый заказ 🔥\n"
+        f"Поделитесь ссылкой для бонусов: {ref_link}\n"
+        "Это ваша реферальная ссылка: если по ней оформляют заказ, вы получаете бонусы!"
+    )
     await main_menu(update, context, welcome)
 
 # Главное меню
@@ -188,7 +258,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message=
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.callback_query:
         query = update.callback_query
-        await query.answer()
+        await answer_callback(query)
         try:
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
         except TelegramError as e:
@@ -203,7 +273,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message=
 # Обработчик главного меню
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     user = update.effective_user
     log_user_action(user.id, user.username, f"Выбор в меню: {data}")
@@ -224,7 +294,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Выбор типа заказа
 async def select_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data if query else None
     user = update.effective_user
     log_user_action(user.id, user.username, "Выбор типа заказа")
@@ -246,7 +316,7 @@ async def select_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Подробности о типе заказа
 async def view_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('order_'):
         key = data[6:]
@@ -291,7 +361,7 @@ async def input_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Выбор срока
 async def select_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('deadline_'):
         days = int(data[9:])
@@ -305,10 +375,94 @@ async def select_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Ввод требований
 async def input_requirements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['requirements'] = update.message.text
-    return await add_upsell(update, context)
+    return await prompt_file_upload(update, context)
 
 async def skip_requirements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['requirements'] = 'Нет'
+    return await prompt_file_upload(update, context)
+
+async def prompt_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['current_files'] = []
+    context.user_data.pop('current_contact', None)
+    text = (
+        "Прикрепите файлы для заказа (если они есть). Отправьте все документы подряд.\n"
+        "Когда закончите, нажмите /done. Если файлов нет, нажмите /skip."
+    )
+    if update.message:
+        await update.message.reply_text(text)
+    elif update.callback_query:
+        query = update.callback_query
+        await answer_callback(query)
+        await query.edit_message_text(text)
+    return UPLOAD_FILES
+
+async def handle_document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    document = update.message.document
+    files = context.user_data.setdefault('current_files', [])
+    files.append({
+        'type': 'document',
+        'file_id': document.file_id,
+        'file_name': document.file_name or 'Файл без названия',
+        'mime_type': document.mime_type,
+    })
+    await update.message.reply_text(
+        f"Файл {document.file_name or 'без названия'} сохранен. Отправьте следующий или нажмите /done."
+    )
+    return UPLOAD_FILES
+
+async def handle_photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    photo = update.message.photo[-1]
+    files = context.user_data.setdefault('current_files', [])
+    files.append({
+        'type': 'photo',
+        'file_id': photo.file_id,
+        'file_unique_id': photo.file_unique_id,
+        'caption': update.message.caption,
+    })
+    await update.message.reply_text("Фото сохранено. Отправьте следующее или нажмите /done.")
+    return UPLOAD_FILES
+
+async def files_text_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text(
+        "Пожалуйста, прикрепите файл или используйте /done, когда закончите. Если файлов нет, нажмите /skip."
+    )
+    return UPLOAD_FILES
+
+async def skip_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data['current_files'] = []
+    await update.message.reply_text("Пропускаем прикрепление файлов.")
+    return await request_contact(update, context)
+
+async def finish_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if context.user_data.get('current_files'):
+        await update.message.reply_text("Файлы сохранены.")
+    else:
+        await update.message.reply_text("Хорошо, продолжаем без файлов.")
+    return await request_contact(update, context)
+
+async def request_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    context.user_data.pop('current_contact', None)
+    prompt = (
+        "Укажите контакт, куда менеджеру написать (Telegram, ВКонтакте, почта). Это обязательное поле."
+    )
+    last_contact = context.user_data.get('last_contact')
+    if last_contact:
+        prompt += f"\nРанее вы указывали: {last_contact}. Можно отправить его снова или написать другой."
+    if update.message:
+        await update.message.reply_text(prompt)
+    elif update.callback_query:
+        query = update.callback_query
+        await answer_callback(query)
+        await query.edit_message_text(prompt)
+    return INPUT_CONTACT
+
+async def input_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    contact = update.message.text.strip()
+    if not contact:
+        await update.message.reply_text("Контакт обязателен. Пожалуйста, укажите, куда менеджеру написать.")
+        return INPUT_CONTACT
+    context.user_data['current_contact'] = contact
+    context.user_data['last_contact'] = contact
     return await add_upsell(update, context)
 
 # Добавление допуслуг
@@ -323,14 +477,14 @@ async def add_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         query = update.callback_query
-        await query.answer()
+        await answer_callback(query)
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return ADD_UPSSELL
 
 # Обработчик допуслуг
 async def upsell_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     upsells = context.user_data.setdefault('upsells', set())  
     added = False
@@ -367,8 +521,10 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     days_left = context.user_data.get('days_left', 14)
     requirements = context.user_data.get('requirements', 'Нет')
     upsells = list(context.user_data.get('upsells', set()))
+    attachments = list(context.user_data.get('current_files', []))
+    contact = context.user_data.get('current_contact') or context.user_data.get('last_contact', '')
     price = calculate_price(type_key, days_left)
-    extra = len(upsells) * 1000  
+    extra = len(upsells) * 1000
     price += extra
     order = {
         'type': type_key,
@@ -377,7 +533,10 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'requirements': requirements,
         'upsells': upsells,
         'price': price,
-        'status': 'новый'
+        'status': 'новый',
+        'attachments': attachments,
+        'contact': contact,
+        'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
     context.user_data.setdefault('cart', []).append(order)
     context.user_data.pop('upsells', None)
@@ -385,6 +544,8 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.pop('days_left', None)
     context.user_data.pop('topic', None)
     context.user_data.pop('current_order_type', None)
+    context.user_data.pop('current_files', None)
+    context.user_data.pop('current_contact', None)
     return await add_another_order(update, context)
 
 # Добавить еще заказ
@@ -400,7 +561,7 @@ async def add_another_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_another_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data == 'add_another_yes':
         return await select_order_type(update, context)
@@ -419,7 +580,14 @@ async def confirm_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     total = 0
     for i, order in enumerate(cart, 1):
         order_name = ORDER_TYPES.get(order['type'], {}).get('name', 'Неизвестно')
-        text += f"{i}. {order_name} - {order['topic']} - {order['price']} ₽\n"
+        contact = order.get('contact') or context.user_data.get('last_contact', 'Контакт не указан')
+        attachments_info = ''
+        if order.get('attachments'):
+            attachments_info = f" (файлов: {len(order['attachments'])})"
+        text += (
+            f"{i}. {order_name} - {order['topic']} - {order['price']} ₽{attachments_info}\n"
+            f"   Контакт: {contact}\n"
+        )
         total += order['price']
     if len(cart) > 1:
         discount = total * 0.1
@@ -435,21 +603,88 @@ async def confirm_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def confirm_cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data == 'place_order':
-        user_id = str(update.effective_user.id)
+        user = update.effective_user
+        user_id = str(user.id)
+        cart_orders = context.user_data.get('cart', [])
+        if not cart_orders:
+            await query.edit_message_text("Корзина пуста.")
+            return await main_menu(update, context)
         user_orders = ORDERS.setdefault(user_id, [])
         order_id = len(user_orders) + 1
-        for order in context.user_data['cart']:
+        for order in cart_orders:
             order['order_id'] = order_id
             user_orders.append(order)
             order_id += 1
         save_json(ORDERS_FILE, ORDERS)
-        text = "Заказ оформлен! Менеджер свяжется с вами. Проверьте профиль для статуса."
-        await query.edit_message_text(text)
+        text = (
+            "Заказ оформлен! С вами свяжется [администратор](https://t.me/Thisissaymoon) в ближайшее время. "
+            "Проверьте профиль для статуса."
+        )
+        await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
         if ADMIN_CHAT_ID:
-            await context.bot.send_message(ADMIN_CHAT_ID, f"Новый заказ от {user_id}: {len(context.user_data['cart'])} позиций")
+            user_link = f"https://t.me/{user.username}" if user.username else f"tg://user?id={user.id}"
+            href_user_link = escape(user_link, quote=True)
+            user_name = escape(user.full_name or user.username or user_id)
+            summary_lines = [
+                "🆕 <b>Новый заказ</b>",
+                f"Пользователь: <a href=\"{href_user_link}\">{user_name}</a> (ID: {user.id})",
+                f"Всего позиций: {len(cart_orders)}"
+            ]
+            for order in cart_orders:
+                order_name = ORDER_TYPES.get(order['type'], {}).get('name', order['type'])
+                topic = escape(order.get('topic', 'Без темы'))
+                requirements = escape(order.get('requirements', 'Нет'))
+                contact_html = format_contact_link(order.get('contact'))
+                upsells_list = ', '.join(UPSELL_TITLES.get(code, code) for code in order.get('upsells', []))
+                upsells_display = escape(upsells_list) if upsells_list else 'Нет'
+                attachments_count = len(order.get('attachments') or [])
+                order_summary = [
+                    f"<b>#{order['order_id']}</b> {escape(order_name)} — {topic}",
+                    f"Срок: {order.get('deadline_days', 'N/A')} дней | Цена: {order.get('price', 0)} ₽",
+                    f"Контакт: {contact_html}",
+                    f"Требования: {requirements if requirements else 'Нет'}",
+                    f"Допы: {upsells_display}",
+                ]
+                if attachments_count:
+                    order_summary.append(f"Файлы: {attachments_count} (отправлены отдельно)")
+                summary_lines.append('<br>'.join(order_summary))
+            admin_message = '<br><br>'.join(summary_lines)
+            await context.bot.send_message(
+                ADMIN_CHAT_ID,
+                admin_message,
+                parse_mode=ParseMode.HTML
+            )
+            for order in cart_orders:
+                attachments = order.get('attachments') or []
+                if not attachments:
+                    continue
+                order_name = ORDER_TYPES.get(order['type'], {}).get('name', order['type'])
+                for idx, file_data in enumerate(attachments, 1):
+                    caption_parts = [
+                        f"<b>Заказ #{order['order_id']}</b> — {escape(order_name)}",
+                        f"Контакт: {format_contact_link(order.get('contact'))}"
+                    ]
+                    if file_data.get('file_name'):
+                        caption_parts.append(f"Файл: {escape(file_data['file_name'])}")
+                    caption_parts.append(f"#{idx} из {len(attachments)}")
+                    caption = '<br>'.join(caption_parts)
+                    if file_data.get('type') == 'photo':
+                        await context.bot.send_photo(
+                            ADMIN_CHAT_ID,
+                            photo=file_data['file_id'],
+                            caption=caption,
+                            parse_mode=ParseMode.HTML
+                        )
+                    else:
+                        await context.bot.send_document(
+                            ADMIN_CHAT_ID,
+                            document=file_data['file_id'],
+                            caption=caption,
+                            parse_mode=ParseMode.HTML
+                        )
         context.user_data.pop('cart', None)
         return await main_menu(update, context, "Спасибо! Хотите заказать еще?")
     elif data == 'cancel_cart':
@@ -460,7 +695,7 @@ async def confirm_cart_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # Показ прайс-листа
 async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('price_detail_'):
         key = data[13:]
@@ -496,7 +731,7 @@ async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Калькулятор цен
 async def price_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('calc_type_'):
         key = data[10:]
@@ -522,7 +757,7 @@ async def price_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def calc_select_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('calc_dead_'):
         days = int(data[10:])
@@ -539,7 +774,7 @@ async def calc_select_deadline(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def calc_select_complexity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('calc_comp_'):
         comp = float(data[10:])
@@ -559,7 +794,7 @@ async def calc_select_complexity(update: Update, context: ContextTypes.DEFAULT_T
 # Показ профиля
 async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     user = update.effective_user
     user_id = str(user.id)
@@ -587,7 +822,7 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Показ заказов
 async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data == 'profile':
         return await show_profile(update, context)
@@ -616,7 +851,7 @@ async def input_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Показ FAQ
 async def show_faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('faq_'):
         idx = int(data[4:])
@@ -648,7 +883,7 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🔐 Админ-панель"
     if update.callback_query:
         query = update.callback_query
-        await query.answer()
+        await answer_callback(query)
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -666,18 +901,103 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Обработчик админ-меню
 async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
+    shared_routes = {
+        'back_to_main': main_menu,
+        'make_order': select_order_type,
+        'price_list': show_price_list,
+        'price_calculator': price_calculator,
+        'profile': show_profile,
+        'faq': show_faq,
+    }
+    if data in shared_routes:
+        context.user_data.pop('admin_state', None)
+        return await shared_routes[data](update, context)
     if data == 'admin_menu':
         return await show_admin_menu(update, context)
+    await answer_callback(query)
+    if data == 'admin_orders':
+        text_lines = []
+        buttons = []
+        for uid, ords in ORDERS.items():
+            for ord_data in ords:
+                text_lines.append(f"#{ord_data.get('order_id', 'N/A')} от {uid}: {ord_data.get('status', 'новый')}")
+                buttons.append([
+                    InlineKeyboardButton(
+                        f"#{ord_data.get('order_id', 'N/A')} ({uid})",
+                        callback_data=f"admin_order|{uid}|{ord_data.get('order_id', 'N/A')}"
+                    )
+                ])
+        if not text_lines:
+            text = "Заказы отсутствуют."
+        else:
+            text = "📋 Заказы:\n" + "\n".join(text_lines[:20])
+        buttons.append([InlineKeyboardButton("Назад", callback_data='admin_menu')])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+        return ADMIN_MENU
+    if data.startswith('admin_order|'):
+        try:
+            _, uid, order_id_str = data.split('|', 2)
+        except ValueError:
+            await query.edit_message_text("Некорректный идентификатор заказа.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data='admin_orders')]]))
+            return ADMIN_MENU
+        order = next((o for o in ORDERS.get(uid, []) if str(o.get('order_id')) == order_id_str), None)
+        if not order:
+            await query.edit_message_text("Заказ не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data='admin_orders')]]))
+            return ADMIN_MENU
+        text = build_order_details(uid, order)
+        keyboard = [
+            [InlineKeyboardButton("Отменить заказ", callback_data=f'admin_cancel|{uid}|{order_id_str}')],
+            [InlineKeyboardButton("Удалить заказ", callback_data=f'admin_delete|{uid}|{order_id_str}')],
+            [InlineKeyboardButton("⬅️ К списку", callback_data='admin_orders')]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+        return ADMIN_MENU
+    if data.startswith('admin_cancel|'):
+        try:
+            _, uid, order_id_str = data.split('|', 2)
+        except ValueError:
+            await query.edit_message_text("Некорректный идентификатор заказа.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data='admin_orders')]]))
+            return ADMIN_MENU
+        order = next((o for o in ORDERS.get(uid, []) if str(o.get('order_id')) == order_id_str), None)
+        if not order:
+            await query.edit_message_text("Заказ не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data='admin_orders')]]))
+            return ADMIN_MENU
+        order['status'] = 'отменен'
+        save_json(ORDERS_FILE, ORDERS)
+        text = f"Статус заказа #{order_id_str} обновлен на 'отменен'."
+        keyboard = [
+            [InlineKeyboardButton("Посмотреть заказ", callback_data=f'admin_order|{uid}|{order_id_str}')],
+            [InlineKeyboardButton("⬅️ К списку", callback_data='admin_orders')]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return ADMIN_MENU
+    if data.startswith('admin_delete|'):
+        try:
+            _, uid, order_id_str = data.split('|', 2)
+        except ValueError:
+            await query.edit_message_text("Некорректный идентификатор заказа.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data='admin_orders')]]))
+            return ADMIN_MENU
+        orders_list = ORDERS.get(uid, [])
+        new_list = [o for o in orders_list if str(o.get('order_id')) != order_id_str]
+        if len(new_list) == len(orders_list):
+            await query.edit_message_text("Заказ не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data='admin_orders')]]))
+            return ADMIN_MENU
+        if new_list:
+            ORDERS[uid] = new_list
+        else:
+            ORDERS.pop(uid, None)
+        save_json(ORDERS_FILE, ORDERS)
+        text = f"Заказ #{order_id_str} удален."
+        keyboard = [
+            [InlineKeyboardButton("⬅️ К списку", callback_data='admin_orders')],
+            [InlineKeyboardButton("Админ-меню", callback_data='admin_menu')]
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        return ADMIN_MENU
     text = ""
     keyboard = [[InlineKeyboardButton("Назад", callback_data='admin_menu')]]
-    if data == 'admin_orders':
-        text = "📋 Заказы:\n"
-        for uid, ords in ORDERS.items():
-            for ord in ords:
-                text += f"#{ord['order_id']} от {uid}: {ord['status']}\n"
-    elif data == 'admin_users':
+    if data == 'admin_users':
         text = "👥 Пользователи:\n" + "\n".join(f"ID: {uid}" for uid in ORDERS.keys())
     elif data == 'admin_logs':
         text = "📊 Логи (последние 10):\n"
@@ -694,8 +1014,6 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await context.bot.send_document(ADMIN_CHAT_ID, open(export_file, 'rb'))
         os.remove(export_file)
         text = "📤 Экспорт отправлен!"
-    elif data == 'back_to_main':
-        return await main_menu(update, context)
     await query.edit_message_text(text or "Неизвестная команда. Возвращаюсь в админ-меню.", reply_markup=InlineKeyboardMarkup(keyboard))
     return ADMIN_MENU
 
@@ -722,6 +1040,14 @@ def main():
             INPUT_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_topic)],
             SELECT_DEADLINE: [CallbackQueryHandler(select_deadline)],
             INPUT_REQUIREMENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_requirements), CommandHandler('skip', skip_requirements)],
+            UPLOAD_FILES: [
+                MessageHandler(filters.Document.ALL, handle_document_upload),
+                MessageHandler(filters.PHOTO, handle_photo_upload),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, files_text_reminder),
+                CommandHandler('skip', skip_files),
+                CommandHandler('done', finish_files)
+            ],
+            INPUT_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_contact)],
             ADD_UPSSELL: [CallbackQueryHandler(upsell_handler)],
             ADD_ANOTHER_ORDER: [CallbackQueryHandler(add_another_handler)],
             CONFIRM_CART: [CallbackQueryHandler(confirm_cart_handler)],
