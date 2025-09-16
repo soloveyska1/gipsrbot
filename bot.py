@@ -901,10 +901,21 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Обработчик админ-меню
 async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await answer_callback(query)
     data = query.data
+    shared_routes = {
+        'back_to_main': main_menu,
+        'make_order': select_order_type,
+        'price_list': show_price_list,
+        'price_calculator': price_calculator,
+        'profile': show_profile,
+        'faq': show_faq,
+    }
+    if data in shared_routes:
+        context.user_data.pop('admin_state', None)
+        return await shared_routes[data](update, context)
     if data == 'admin_menu':
         return await show_admin_menu(update, context)
+    await answer_callback(query)
     if data == 'admin_orders':
         text_lines = []
         buttons = []
@@ -1003,8 +1014,6 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await context.bot.send_document(ADMIN_CHAT_ID, open(export_file, 'rb'))
         os.remove(export_file)
         text = "📤 Экспорт отправлен!"
-    elif data == 'back_to_main':
-        return await main_menu(update, context)
     await query.edit_message_text(text or "Неизвестная команда. Возвращаюсь в админ-меню.", reply_markup=InlineKeyboardMarkup(keyboard))
     return ADMIN_MENU
 
