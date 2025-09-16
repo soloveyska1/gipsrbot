@@ -24,6 +24,28 @@ log() {
 
 log "Запуск автоматической установки GIPSR Bot..."
 
+wait_for_path() {
+  local target="$1"
+  local description="${2:-$1}"
+  if [[ -e "$target" ]]; then
+    log "Найдено: $description"
+    return 0
+  fi
+  log "Ждём, когда появится $description..."
+  while [[ ! -e "$target" ]]; do
+    sleep 3
+  done
+  log "Найдено: $description"
+}
+
+log "Проверяем, что репозиторий загружен в $APP_DIR"
+wait_for_path "$APP_DIR/bot.py" "bot.py"
+wait_for_path "$APP_DIR/requirements.txt" "requirements.txt"
+wait_for_path "$APP_DIR/scripts/install.sh" "scripts/install.sh"
+wait_for_path "$ENV_FILE" ".env"
+
+chmod +x "$APP_DIR/scripts/install.sh" "$APP_DIR/scripts/run.sh" 2>/dev/null || true
+
 if command -v apt-get >/dev/null 2>&1; then
   export DEBIAN_FRONTEND=noninteractive
   log "Обновляем список пакетов..."
@@ -34,8 +56,13 @@ else
   log "apt-get не найден. Предполагаем, что зависимости уже установлены."
 fi
 
-if [[ ! -f "$ENV_FILE" ]]; then
-  log "Файл .env не найден. Загрузите его вместе с проектом и повторите установку."
+if [[ ! -s "$ENV_FILE" ]]; then
+  log "Файл .env пустой. Заполните его перед установкой."
+  exit 1
+fi
+
+if ! grep -Eq '^TELEGRAM_BOT_TOKEN=[^\s]+$' "$ENV_FILE"; then
+  log "В .env отсутствует TELEGRAM_BOT_TOKEN. Проверьте файл и перезапустите установку."
   exit 1
 fi
 

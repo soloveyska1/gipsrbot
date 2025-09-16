@@ -7,5 +7,42 @@ packages:
   - python3-venv
   - systemd
   - supervisor
+write_files:
+  - path: /etc/systemd/system/gipsrbot-autodeploy.service
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=GIPSR Bot auto deployment
+      After=network-online.target
+      Wants=network-online.target
+
+      [Service]
+      Type=oneshot
+      WorkingDirectory=/root/gipsr_bot
+      ExecStart=/bin/bash /root/gipsr_bot/scripts/autodeploy.sh
+      StandardOutput=journal
+      StandardError=journal
+
+      [Install]
+      WantedBy=multi-user.target
+  - path: /etc/systemd/system/gipsrbot-autodeploy.path
+    owner: root:root
+    permissions: '0644'
+    content: |
+      [Unit]
+      Description=Trigger GIPSR Bot deployment when files arrive
+
+      [Path]
+      PathExists=/root/gipsr_bot/scripts/autodeploy.sh
+      PathChanged=/root/gipsr_bot/.env
+      PathChanged=/root/gipsr_bot/bot.py
+      PathChanged=/root/gipsr_bot/requirements.txt
+      Unit=gipsrbot-autodeploy.service
+
+      [Install]
+      WantedBy=multi-user.target
 runcmd:
-  - [bash, -lc, 'if [ -d /root/gipsr_bot ]; then cd /root/gipsr_bot && bash scripts/autodeploy.sh; else echo "[gipsr_bot] Папка /root/gipsr_bot не найдена. Загрузите проект через FileZilla и перезагрузите сервер." >&2; fi']
+  - [mkdir, -p, /root/gipsr_bot]
+  - [systemctl, daemon-reload]
+  - [systemctl, enable, '--now', 'gipsrbot-autodeploy.path']
