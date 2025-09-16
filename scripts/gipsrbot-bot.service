@@ -1,0 +1,17 @@
+[Unit]
+Description=GIPSR Telegram Bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/root/gipsr_bot
+EnvironmentFile=/root/gipsr_bot/.env
+ExecStart=/root/gipsr_bot/.venv/bin/python /root/gipsr_bot/bot.py
+Restart=always
+RestartSec=5
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
