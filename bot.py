@@ -864,12 +864,12 @@ async def confirm_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
             upsell_html = 'нет'
         text_lines.extend([
             f"{i}. <b>{html.escape(order_name)}</b> — {html.escape(order.get('topic', 'Без темы'))} — {order['price']} ₽",
-            f"&nbsp;&nbsp;Срок: {html.escape(deadline_display)}",
-            f"&nbsp;&nbsp;Контакт: {contact_html}",
-            f"&nbsp;&nbsp;Допы: {upsell_html}",
+            f"• Срок: {html.escape(deadline_display)}",
+            f"• Контакт: {contact_html}",
+            f"• Допы: {upsell_html}",
         ])
         if order.get('files'):
-            text_lines.append(f"&nbsp;&nbsp;Файлы: {len(order['files'])} шт.")
+            text_lines.append(f"• Файлы: {len(order['files'])} шт.")
         total += order['price']
     if len(cart) > 1:
         discount = round_price(total * 0.1)
