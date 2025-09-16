@@ -815,6 +815,12 @@ async def admin_show_logs(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return ADMIN_MENU
 
 
+def reset_admin_context(context: ContextTypes.DEFAULT_TYPE):
+    """Очистка временных состояний при выходе из админ-потока."""
+    for key in ('admin_state', 'target_user', 'price_edit'):
+        context.user_data.pop(key, None)
+
+
 ORDER_TYPES = {
     'samostoyatelnye': {
         'name': 'Самостоятельные, контрольные, эссе',
@@ -1629,8 +1635,20 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Обработчик админ-меню
 async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
     data = query.data
+    # Позволяем из админ-панели сразу перейти к пользовательским разделам
+    main_menu_routes = {
+        'make_order': select_order_type,
+        'price_list': show_price_list,
+        'price_calculator': price_calculator,
+        'profile': show_profile,
+        'faq': show_faq,
+        'back_to_main': main_menu,
+    }
+    if data in main_menu_routes:
+        reset_admin_context(context)
+        return await main_menu_routes[data](update, context)
+    await query.answer()
     if data == 'admin_menu':
         return await show_admin_menu(update, context)
     if data == 'admin_orders':
@@ -1692,8 +1710,6 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
         os.remove(export_file)
         await query.edit_message_text("📤 Экспорт отправлен!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data='admin_menu')]]))
         return ADMIN_MENU
-    if data == 'back_to_main':
-        return await main_menu(update, context)
     await query.edit_message_text("Неизвестная команда. Возвращаюсь в админ-меню.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data='admin_menu')]]))
     return ADMIN_MENU
 
