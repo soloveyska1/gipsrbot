@@ -28,10 +28,13 @@ from telegram.ext import (
 from config import (
     BOT_TOKEN,
     DEFAULT_ADMIN_CHAT_ID as CONFIG_ADMIN_CHAT_ID,
-    DEFAULT_ADMIN_USERNAME,
+    DEFAULT_ADMIN_USERNAME as CONFIG_ADMIN_USERNAME,
     DEFAULT_PRICING_MODE,
     MANAGER_CONTACT_URL as CONFIG_MANAGER_CONTACT_URL,
     ORDER_STATUS_TITLES,
+    OWNER_CHAT_ID as CONFIG_OWNER_CHAT_ID,
+    OWNER_USERNAME as CONFIG_OWNER_USERNAME,
+    SECONDARY_ADMINS,
     WELCOME_MESSAGE,
 )
 
@@ -39,13 +42,29 @@ load_dotenv()
 
 TELEGRAM_BOT_TOKEN = (os.getenv("TELEGRAM_BOT_TOKEN") or BOT_TOKEN or "").strip()
 
+owner_id_env = os.getenv("OWNER_CHAT_ID")
 admin_id_env = os.getenv("ADMIN_CHAT_ID")
+
 try:
-    ADMIN_CHAT_ID_DEFAULT = (
-        int(admin_id_env) if admin_id_env is not None else int(CONFIG_ADMIN_CHAT_ID)
+    OWNER_CHAT_ID_DEFAULT = (
+        int(owner_id_env) if owner_id_env is not None else int(CONFIG_OWNER_CHAT_ID or 0)
     )
 except ValueError:
-    ADMIN_CHAT_ID_DEFAULT = int(CONFIG_ADMIN_CHAT_ID)
+    OWNER_CHAT_ID_DEFAULT = int(CONFIG_OWNER_CHAT_ID or 0)
+
+try:
+    ADMIN_CHAT_ID_DEFAULT = (
+        int(admin_id_env) if admin_id_env is not None else int(CONFIG_ADMIN_CHAT_ID or 0)
+    )
+except ValueError:
+    ADMIN_CHAT_ID_DEFAULT = int(CONFIG_ADMIN_CHAT_ID or 0)
+
+DEFAULT_OWNER_USERNAME = (
+    os.getenv("OWNER_USERNAME") or CONFIG_OWNER_USERNAME or ""
+).strip()
+ADMIN_USERNAME_DEFAULT = (
+    os.getenv("ADMIN_USERNAME") or CONFIG_ADMIN_USERNAME or ""
+).strip()
 
 MANAGER_CONTACT_LINK = (
     os.getenv("MANAGER_CONTACT") or CONFIG_MANAGER_CONTACT_URL or ""
@@ -240,11 +259,26 @@ class OrderRecord:
 
 class DataStore:
     def __init__(self) -> None:
+        default_notification_ids: List[int] = []
+        if OWNER_CHAT_ID_DEFAULT:
+            default_notification_ids.append(int(OWNER_CHAT_ID_DEFAULT))
+        if ADMIN_CHAT_ID_DEFAULT and ADMIN_CHAT_ID_DEFAULT not in default_notification_ids:
+            default_notification_ids.append(int(ADMIN_CHAT_ID_DEFAULT))
+        for entry in SECONDARY_ADMINS or []:
+            try:
+                extra_id = int(entry.get("chat_id", 0))
+            except (TypeError, ValueError):
+                continue
+            if extra_id and extra_id not in default_notification_ids:
+                default_notification_ids.append(extra_id)
         default_settings = {
             "pricing_mode": DEFAULT_PRICING_MODE,
+            "owner_chat_id": OWNER_CHAT_ID_DEFAULT,
+            "owner_username": DEFAULT_OWNER_USERNAME,
             "admin_chat_id": ADMIN_CHAT_ID_DEFAULT,
-            "admin_username": DEFAULT_ADMIN_USERNAME,
+            "admin_username": ADMIN_USERNAME_DEFAULT,
             "manager_contact_url": MANAGER_CONTACT_LINK,
+            "notification_chat_ids": default_notification_ids,
         }
         loaded_settings = self._load_json(SETTINGS_FILE, default_settings)
         changed = False
@@ -252,6 +286,18 @@ class DataStore:
             if key not in loaded_settings:
                 loaded_settings[key] = value
                 changed = True
+        if (
+            int(default_settings.get("owner_chat_id", 0))
+            and int(loaded_settings.get("owner_chat_id", 0)) == 0
+        ):
+            loaded_settings["owner_chat_id"] = default_settings["owner_chat_id"]
+            changed = True
+        if (
+            default_settings.get("owner_username")
+            and not loaded_settings.get("owner_username")
+        ):
+            loaded_settings["owner_username"] = default_settings["owner_username"]
+            changed = True
         if (
             int(default_settings.get("admin_chat_id", 0))
             and int(loaded_settings.get("admin_chat_id", 0)) == 0
@@ -264,6 +310,15 @@ class DataStore:
         ):
             loaded_settings["admin_username"] = default_settings["admin_username"]
             changed = True
+        notifications = loaded_settings.get("notification_chat_ids")
+        if not isinstance(notifications, list):
+            notifications = []
+            changed = True
+        for value in default_notification_ids:
+            if value and value not in notifications:
+                notifications.append(value)
+                changed = True
+        loaded_settings["notification_chat_ids"] = notifications
         if changed:
             self._save_json(SETTINGS_FILE, loaded_settings)
         self.settings: Dict[str, object] = loaded_settings
@@ -297,6 +352,28 @@ class DataStore:
         self.settings["pricing_mode"] = mode
         self._save_json(SETTINGS_FILE, self.settings)
 
+    def get_owner_chat_id(self) -> int:
+        try:
+            return int(self.settings.get("owner_chat_id", 0))
+        except (TypeError, ValueError):
+            return 0
+
+    def set_owner_chat_id(self, chat_id: int, username: Optional[str] = None) -> None:
+        try:
+            normalized = int(chat_id)
+        except (TypeError, ValueError):
+            normalized = 0
+        self.settings["owner_chat_id"] = normalized
+        if username is not None:
+            self.settings["owner_username"] = username or ""
+        notifications = self.settings.get("notification_chat_ids")
+        if not isinstance(notifications, list):
+            notifications = []
+        if normalized and normalized not in notifications:
+            notifications.append(normalized)
+        self.settings["notification_chat_ids"] = notifications
+        self._save_json(SETTINGS_FILE, self.settings)
+
     def get_admin_chat_id(self) -> int:
         try:
             return int(self.settings.get("admin_chat_id", 0))
@@ -304,13 +381,45 @@ class DataStore:
             return 0
 
     def set_admin_chat_id(self, chat_id: int, username: Optional[str] = None) -> None:
-        self.settings["admin_chat_id"] = int(chat_id)
+        try:
+            normalized = int(chat_id)
+        except (TypeError, ValueError):
+            normalized = 0
+        self.settings["admin_chat_id"] = normalized
         if username is not None:
             self.settings["admin_username"] = username or ""
+        notifications = self.settings.get("notification_chat_ids")
+        if not isinstance(notifications, list):
+            notifications = []
+        if normalized and normalized not in notifications:
+            notifications.append(normalized)
+        self.settings["notification_chat_ids"] = notifications
         self._save_json(SETTINGS_FILE, self.settings)
 
     def get_admin_username(self) -> str:
         return str(self.settings.get("admin_username", "") or "")
+
+    def get_notification_chat_ids(self) -> List[int]:
+        recipients: List[int] = []
+        owner_id = self.get_owner_chat_id()
+        if owner_id:
+            recipients.append(owner_id)
+        try:
+            admin_id = int(self.settings.get("admin_chat_id", 0))
+        except (TypeError, ValueError):
+            admin_id = 0
+        if admin_id and admin_id not in recipients:
+            recipients.append(admin_id)
+        extras = self.settings.get("notification_chat_ids", [])
+        if isinstance(extras, list):
+            for value in extras:
+                try:
+                    candidate = int(value)
+                except (TypeError, ValueError):
+                    continue
+                if candidate and candidate not in recipients:
+                    recipients.append(candidate)
+        return recipients
 
     def get_manager_contact(self) -> str:
         return str(self.settings.get("manager_contact_url", MANAGER_CONTACT_LINK))
@@ -495,6 +604,22 @@ def log_user_action(update: Update, action: str) -> None:
     if not user:
         return
     store.log_action(user.id, user.username, action)
+
+
+async def ensure_owner_access(
+    update: Update, context: ContextTypes.DEFAULT_TYPE
+) -> bool:
+    user = update.effective_user
+    owner_id = store.get_owner_chat_id()
+    if not user or user.id != owner_id:
+        if update.message:
+            await update.message.reply_text(
+                "Админ-панель доступна только владельцу бота."
+            )
+        elif update.callback_query:
+            await update.callback_query.answer("Нет доступа", show_alert=True)
+        return False
+    return True
 
 
 def calculate_price(
@@ -894,12 +1019,11 @@ async def handle_requirement_attachment(update: Update, context: ContextTypes.DE
         draft.setdefault("requirements_texts", []).append(caption.strip())
         finalize_requirement_text(draft)
     log_user_action(update, f"order_attachment:{attachment_type}")
-    admin_chat_id = store.get_admin_chat_id()
-    if admin_chat_id:
+    for admin_chat_id in store.get_notification_chat_ids():
         try:
             await message.forward(admin_chat_id)
         except Exception as exc:  # pragma: no cover - зависит от Telegram API
-            logger.warning("Не удалось переслать вложение админу: %s", exc)
+            logger.warning("Не удалось переслать вложение админу %s: %s", admin_chat_id, exc)
     await message.reply_text(
         f"Добавили: {label}. Можно прикрепить ещё или нажать /done, когда всё готово.")
     return STATE_ORDER_REQUIREMENTS
@@ -1047,8 +1171,8 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
         text += f"\nНачислили +{loyalty_bonus} ₽ за заказ — их можно тратить на следующие работы."
     query = update.callback_query
     await query.edit_message_text(text)
-    admin_chat_id = store.get_admin_chat_id()
-    if admin_chat_id:
+    notification_ids = store.get_notification_chat_ids()
+    if notification_ids:
         order_type = order_type_name_from_key(order.type_key)
         upsell_titles = [UPSELL_OPTIONS.get(u, {}).get("title", u) for u in order.upsells]
         admin_text = (
@@ -1064,10 +1188,11 @@ async def confirm_order(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
             f"Итого: {final_price} ₽\n"
             f"Файлы: {len(attachments)} (пересланы отдельными сообщениями)"
         )
-        try:
-            await context.bot.send_message(admin_chat_id, admin_text)
-        except Exception as exc:  # pragma: no cover - depends on Telegram API
-            logger.error("Failed to notify admin: %s", exc)
+        for admin_chat_id in notification_ids:
+            try:
+                await context.bot.send_message(admin_chat_id, admin_text)
+            except Exception as exc:  # pragma: no cover - depends on Telegram API
+                logger.error("Failed to notify admin %s: %s", admin_chat_id, exc)
     return await show_main_menu(update, context, "Хотите оформить еще одну работу?")
 
 async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
@@ -1292,15 +1417,14 @@ async def receive_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE) -
     store.add_feedback(user.id, feedback)
     log_user_action(update, "feedback_left")
     await update.message.reply_text("Спасибо! Мы ценим обратную связь — менеджер ответит в ближайшее время.")
-    admin_chat_id = store.get_admin_chat_id()
-    if admin_chat_id:
+    for admin_chat_id in store.get_notification_chat_ids():
         try:
             await context.bot.send_message(
                 admin_chat_id,
                 f"Новый отзыв от {user.id} ({user.username or user.full_name}):\n{feedback}",
             )
         except Exception as exc:  # pragma: no cover
-            logger.error("Failed to send feedback to admin: %s", exc)
+            logger.error("Failed to send feedback to admin %s: %s", admin_chat_id, exc)
     return await show_main_menu(update, context)
 
 
@@ -1334,13 +1458,7 @@ async def show_faq_item(update: Update, idx: int) -> int:
     return STATE_NAVIGATION
 
 async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    admin_chat_id = store.get_admin_chat_id()
-    if not user or user.id != admin_chat_id:
-        if update.message:
-            await update.message.reply_text("Админ-панель доступна только владельцу бота.")
-        elif update.callback_query:
-            await update.callback_query.answer("Нет доступа", show_alert=True)
+    if not await ensure_owner_access(update, context):
         return STATE_NAVIGATION
     keyboard = [
         [InlineKeyboardButton("📊 Статистика", callback_data="admin:stats")],
@@ -1362,14 +1480,9 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
 
 
 async def restart_bot(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    user = update.effective_user
-    admin_chat_id = store.get_admin_chat_id()
-    if not user or user.id != admin_chat_id:
-        if update.message:
-            await update.message.reply_text("Команда доступна только администратору.")
-        elif update.callback_query:
-            await update.callback_query.answer("Нет доступа", show_alert=True)
+    if not await ensure_owner_access(update, context):
         return STATE_NAVIGATION
+    user = update.effective_user
     source = "callback" if update.callback_query else "command"
     notify_text = "Перезапускаю бота. Он вернётся через несколько секунд."
     if update.callback_query:
@@ -1387,7 +1500,9 @@ async def admin_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> i
     return await show_admin_menu(update, context)
 
 
-async def admin_show_stats(update: Update) -> int:
+async def admin_show_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await ensure_owner_access(update, context):
+        return STATE_NAVIGATION
     stats = store.get_statistics()
     text = (
         "📊 <b>Сводка по заказам</b>\n\n"
@@ -1402,7 +1517,9 @@ async def admin_show_stats(update: Update) -> int:
     return STATE_NAVIGATION
 
 
-async def admin_show_orders(update: Update) -> int:
+async def admin_show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await ensure_owner_access(update, context):
+        return STATE_NAVIGATION
     records = [order for orders in store.orders.values() for order in orders]
     records = sorted(records, key=lambda item: item.get("created_at", ""), reverse=True)[:10]
     if not records:
@@ -1436,6 +1553,8 @@ async def admin_show_orders(update: Update) -> int:
 
 
 async def admin_request_pricing_mode(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await ensure_owner_access(update, context):
+        return STATE_NAVIGATION
     context.user_data["admin_state"] = "pricing_mode"
     await update.callback_query.edit_message_text(
         f"Текущий режим: {store.get_pricing_mode()}. Введите hard или light:",
@@ -1444,6 +1563,8 @@ async def admin_request_pricing_mode(update: Update, context: ContextTypes.DEFAU
 
 
 async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await ensure_owner_access(update, context):
+        return STATE_NAVIGATION
     path = store.export_orders()
     if not path:
         await update.callback_query.edit_message_text(
@@ -1452,9 +1573,9 @@ async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
         return STATE_NAVIGATION
     await update.callback_query.edit_message_text("Отправляю файл с заказами…")
     try:
-        admin_chat_id = store.get_admin_chat_id()
-        if admin_chat_id:
-            await context.bot.send_document(admin_chat_id, document=path.open("rb"))
+        owner_chat_id = store.get_owner_chat_id()
+        if owner_chat_id:
+            await context.bot.send_document(owner_chat_id, document=path.open("rb"))
     finally:
         path.unlink(missing_ok=True)
     await update.callback_query.edit_message_text(
@@ -1464,7 +1585,9 @@ async def admin_export(update: Update, context: ContextTypes.DEFAULT_TYPE) -> in
     return STATE_NAVIGATION
 
 
-async def admin_show_bonuses(update: Update) -> int:
+async def admin_show_bonuses(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await ensure_owner_access(update, context):
+        return STATE_NAVIGATION
     stats = store.list_referral_stats()
     if not stats:
         text = "Бонусов пока нет. Делитесь реферальной ссылкой из профиля клиентов."
@@ -1482,7 +1605,9 @@ async def admin_show_bonuses(update: Update) -> int:
     return STATE_NAVIGATION
 
 
-async def admin_show_logs(update: Update) -> int:
+async def admin_show_logs(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await ensure_owner_access(update, context):
+        return STATE_NAVIGATION
     last_logs = []
     for user_id, logs in store.user_logs.items():
         if logs:
@@ -1502,6 +1627,8 @@ async def admin_show_logs(update: Update) -> int:
 
 
 async def admin_list_status_targets(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await ensure_owner_access(update, context):
+        return STATE_NAVIGATION
     records = store.list_recent_orders(limit=12)
     if not records:
         await update.callback_query.edit_message_text(
@@ -1532,6 +1659,8 @@ async def admin_list_status_targets(update: Update, context: ContextTypes.DEFAUL
 async def admin_select_status(
     update: Update, context: ContextTypes.DEFAULT_TYPE, user_id: int, order_id: int
 ) -> int:
+    if not await ensure_owner_access(update, context):
+        return STATE_NAVIGATION
     context.user_data["admin_status_target"] = {"user_id": user_id, "order_id": order_id}
     record = store.get_order(user_id, order_id)
     if record is None:
@@ -1564,6 +1693,8 @@ async def admin_select_status(
 async def admin_apply_status(
     update: Update, context: ContextTypes.DEFAULT_TYPE, status_key: str
 ) -> int:
+    if not await ensure_owner_access(update, context):
+        return STATE_NAVIGATION
     target = context.user_data.get("admin_status_target")
     if not target:
         return await admin_list_status_targets(update, context)
@@ -1597,6 +1728,8 @@ async def admin_apply_status(
 
 
 async def handle_admin_text(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    if not await ensure_owner_access(update, context):
+        return STATE_NAVIGATION
     state = context.user_data.pop("admin_state", None)
     if state == "pricing_mode":
         choice = update.message.text.strip().lower()
@@ -1675,17 +1808,17 @@ async def handle_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) ->
     if data == "admin:menu":
         return await show_admin_menu(update, context)
     if data == "admin:stats":
-        return await admin_show_stats(update)
+        return await admin_show_stats(update, context)
     if data == "admin:orders":
-        return await admin_show_orders(update)
+        return await admin_show_orders(update, context)
     if data == "admin:pricing":
         return await admin_request_pricing_mode(update, context)
     if data == "admin:export":
         return await admin_export(update, context)
     if data == "admin:bonuses":
-        return await admin_show_bonuses(update)
+        return await admin_show_bonuses(update, context)
     if data == "admin:logs":
-        return await admin_show_logs(update)
+        return await admin_show_logs(update, context)
     if data == "admin:restart":
         return await restart_bot(update, context)
     if data == "admin:status_list":
@@ -1708,10 +1841,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     user = update.effective_user
     context.user_data.pop("order_draft", None)
     promoted_text = ""
-    admin_chat_id = store.get_admin_chat_id()
-    if user and admin_chat_id == 0:
-        store.set_admin_chat_id(user.id, user.username or user.full_name or "")
-        admin_chat_id = user.id
+    owner_chat_id = store.get_owner_chat_id()
+    if user and owner_chat_id == 0:
+        store.set_owner_chat_id(user.id, user.username or user.full_name or "")
+        owner_chat_id = user.id
         promoted_text = (
             "\n\nВы назначены администратором бота. Используйте /admin для управления заказами."
         )
@@ -1720,15 +1853,18 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
         if payload.isdigit():
             referrer_id = int(payload)
             if referrer_id != user.id and store.add_referral(referrer_id, user.id):
-                admin_id = store.get_admin_chat_id()
-                if admin_id:
+                for admin_id in store.get_notification_chat_ids():
                     try:
                         await context.bot.send_message(
                             admin_id,
                             f"Новый реферал: {user.id} (пригласил {referrer_id})",
                         )
                     except Exception as exc:  # pragma: no cover
-                        logger.error("Failed to notify admin about referral: %s", exc)
+                        logger.error(
+                            "Failed to notify admin %s about referral: %s",
+                            admin_id,
+                            exc,
+                        )
                 try:
                     bonus_info = store.get_bonus_info(referrer_id)
                     await context.bot.send_message(
@@ -1772,8 +1908,7 @@ async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
 async def error_handler(update: object, context: ContextTypes.DEFAULT_TYPE) -> None:
     logger.exception("Unhandled error: %s", context.error)
-    admin_chat_id = store.get_admin_chat_id()
-    if admin_chat_id:
+    for admin_chat_id in store.get_notification_chat_ids():
         try:
             await context.bot.send_message(admin_chat_id, f"Ошибка в боте: {context.error}")
         except Exception:  # pragma: no cover

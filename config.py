@@ -4,10 +4,27 @@
 # Пользователь просил полностью готовый конфиг, поэтому токен уже прописан.
 BOT_TOKEN: str = "7387413773:AAFgKfuf-REN5cn1ZXmCQg"
 
-# === Администратор по умолчанию ===
-# 0 означает, что первый человек, написавший /start, станет админом.
-DEFAULT_ADMIN_CHAT_ID: int = 2019512207
-DEFAULT_ADMIN_USERNAME: str = "Nnnnnnnnn234567"
+# === Владельцы и администраторы ===
+# Все права доступны владельцу (Семён), Анна получает только уведомления.
+OWNER_CHAT_ID: int = 872379852
+OWNER_USERNAME: str = "Thisissaymoon"
+
+SECONDARY_ADMINS = [
+    {
+        "chat_id": 2019512207,
+        "username": "Nnnnnnnnn234567",
+        "name": "Анна",
+    }
+]
+
+if SECONDARY_ADMINS:
+    DEFAULT_ADMIN_CHAT_ID: int = int(SECONDARY_ADMINS[0]["chat_id"])
+    DEFAULT_ADMIN_USERNAME: str = str(
+        SECONDARY_ADMINS[0].get("username", "")
+    )
+else:
+    DEFAULT_ADMIN_CHAT_ID = 0
+    DEFAULT_ADMIN_USERNAME = ""
 
 # === Базовые настройки проекта ===
 PROJECT_NAME: str = "gipsr_bot"
