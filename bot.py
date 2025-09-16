@@ -3,7 +3,8 @@ import logging
 import json
 import html
 import re
-from datetime import datetime, timedelta
+from typing import Optional
+from datetime import datetime
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes,
@@ -63,11 +64,12 @@ def save_json(file_path, data):
 
 # Глобальные данные
 PRICES = load_json(PRICES_FILE, {
-    'samostoyatelnye': {'base': 2000, 'min': 2000, 'max': 5000},
-    'kursovaya_teoreticheskaya': {'base': 8000, 'min': 8000, 'max': 12000},
-    'kursovaya_s_empirikov': {'base': 12000, 'min': 12000, 'max': 18000},
-    'diplomnaya': {'base': 35000, 'min': 35000, 'max': 50000},
-    'magisterskaya': {'base': 35000, 'min': 35000, 'max': 60000}
+    'samostoyatelnye': {'base': 2500, 'min': 2500},
+    'kursovaya_teoreticheskaya': {'base': 8000, 'min': 8000},
+    'kursovaya_s_empirikov': {'base': 12000, 'min': 12000},
+    'diplomnaya': {'base': 35000, 'min': 35000},
+    'magisterskaya': {'base': 40000, 'min': 40000},
+    'normcontrol': {'base': 5000, 'min': 5000}
 })
 REFERALS = load_json(REFERRALS_FILE)
 ORDERS = load_json(ORDERS_FILE)
@@ -79,7 +81,7 @@ ORDER_TYPES = {
         'name': 'Самостоятельные, контрольные, эссе',
         'icon': '📝',
         'description': 'Быстрые задания: эссе, контрольные, рефераты. Идеально для студентов! Уже 5000+ выполнено 🔥',
-        'details': 'Объем до 20 страниц. Быстрое выполнение с гарантией качества.',
+        'details': 'Любой объем: от 1 страницы и более 20 тоже сделаем. Стоимость зависит от сроков, сложности и объема — подбираем оптимально.',
         'examples': ['Эссе по литературе', 'Контрольная по математике', 'Реферат по истории']
     },
     'kursovaya_teoreticheskaya': {
@@ -109,6 +111,13 @@ ORDER_TYPES = {
         'description': 'Инновационное исследование. 100% оригинальность гарантирована! 🌟',
         'details': 'Научная новизна, методология, публикации.',
         'examples': ['Разработка моделей AI', 'Комплексные исследования экологии']
+    },
+    'normcontrol': {
+        'name': 'Нормоконтроль',
+        'icon': '📐',
+        'description': 'Проверим оформление по ГОСТ и методичкам без стресса. Быстрый разбор замечаний.',
+        'details': 'Приведем текст в идеальное состояние: структура, ссылки, списки литературы. Минимальная стоимость — 5000 ₽, далее зависит от объема и срочности.',
+        'examples': ['Нормоконтроль диплома', 'Проверка курсовой перед сдачей']
     }
 }
 
@@ -116,6 +125,33 @@ UPSELL_LABELS = {
     'prez': 'Презентация',
     'speech': 'Речь'
 }
+
+UPSELL_PRICES = {
+    'prez': 2000,
+    'speech': 1000,
+}
+
+DEADLINE_PRESETS = [
+    {'key': '24h', 'label': '⏱ 24 часа или меньше', 'days': 1, 'multiplier': 1.8, 'badge': 'Максимальная наценка за срочность'},
+    {'key': '3d', 'label': '🚀 3 дня', 'days': 3, 'multiplier': 1.45, 'badge': 'Ускоренный срок'},
+    {'key': '5d', 'label': '⚡️ 5 дней', 'days': 5, 'multiplier': 1.3, 'badge': 'Помогаем успеть вовремя'},
+    {'key': '7d', 'label': '📅 Неделя', 'days': 7, 'multiplier': 1.15, 'badge': 'Оптимальный баланс'},
+    {'key': '14d', 'label': '✅ 2 недели', 'days': 14, 'multiplier': 1.0, 'badge': 'Базовый тариф'},
+    {'key': '21d', 'label': '🌿 3 недели', 'days': 21, 'multiplier': 0.95, 'badge': 'Спокойный темп'},
+    {'key': '30d', 'label': '🧘 Месяц', 'days': 30, 'multiplier': 0.9, 'badge': 'Работаем без спешки'},
+    {'key': '45d', 'label': '🛡 Больше месяца', 'days': 45, 'multiplier': 0.85, 'badge': 'Лучшие условия и бонусы'},
+]
+
+DEADLINE_LOOKUP = {item['key']: item for item in DEADLINE_PRESETS}
+DEFAULT_DEADLINE_KEY = '14d'
+
+
+def get_deadline_preset(key):
+    return DEADLINE_LOOKUP.get(key) or DEADLINE_LOOKUP[DEFAULT_DEADLINE_KEY]
+
+
+def round_price(amount: float) -> int:
+    return int(max(0, (float(amount) + 25) // 50 * 50))
 
 FAQ_ITEMS = [
     {'question': 'Как сделать заказ?', 'answer': 'Выберите "Сделать заказ" и следуйте шагам. Можно заказать несколько работ сразу!'},
@@ -168,29 +204,39 @@ def build_contact_link(contact_text):
         return f"https://{contact}"
     return None
 
+
+def build_deadline_keyboard(callback_prefix: str, include_back: bool = False, back_callback: Optional[str] = None):
+    rows = []
+    for i in range(0, len(DEADLINE_PRESETS), 2):
+        chunk = DEADLINE_PRESETS[i:i + 2]
+        row = [
+            InlineKeyboardButton(item['label'], callback_data=f"{callback_prefix}{item['key']}")
+            for item in chunk
+        ]
+        rows.append(row)
+    if include_back and back_callback:
+        rows.append([InlineKeyboardButton('⬅️ Назад', callback_data=back_callback)])
+    return InlineKeyboardMarkup(rows)
+
 def get_user_link(user):
     if user.username:
         return f"https://t.me/{user.username}"
     return f"tg://user?id={user.id}"
 
 # Расчет цены
-def calculate_price(order_type_key, days_left, complexity_factor=1.0):
+def calculate_price(order_type_key: str, deadline_key: str, complexity_factor: float = 1.0) -> int:
     if order_type_key not in PRICES:
         logger.error(f"Неизвестный тип: {order_type_key}")
         return 0
-    base = PRICES[order_type_key]['base']
-    price = int(base * complexity_factor)
-    if current_pricing_mode == 'hard':
-        if days_left < 7:
-            price *= 1.3
-        elif days_left < 15:
-            price *= 1.15
-    else:
-        if days_left < 3:
-            price *= 1.3
-        elif days_left < 7:
-            price *= 1.15
-    return int(price)
+    pricing = PRICES[order_type_key]
+    base = pricing.get('base', pricing.get('min', 0))
+    min_price = pricing.get('min', base)
+    preset = get_deadline_preset(deadline_key)
+    deadline_multiplier = preset.get('multiplier', 1.0)
+    mode_multiplier = 1.1 if current_pricing_mode == 'hard' else 1.0
+    raw_price = base * deadline_multiplier * complexity_factor * mode_multiplier
+    price = max(raw_price, min_price)
+    return round_price(price)
 
 # Обработчик ошибок
 async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -311,7 +357,16 @@ async def view_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text("Ошибка: неизвестный тип.")
             return SELECT_ORDER_TYPE
         val = ORDER_TYPES[key]
-        text = f"{val['icon']} *{val['name']}*\n\n{val['description']}\n{val['details']}\nПримеры: {', '.join(val['examples'])}\n\nЗаказать? (Добавьте презентацию/речь для полного пакета!)"
+        prices = PRICES.get(key, {})
+        min_price = prices.get('min') or prices.get('base')
+        price_line = f"Минимальная стоимость: {min_price} ₽ при комфортных сроках." if min_price else ""
+        text = (
+            f"{val['icon']} *{val['name']}*\n\n{val['description']}\n{val['details']}\n"
+            f"Примеры: {', '.join(val['examples'])}"
+        )
+        if price_line:
+            text += f"\n{price_line}"
+        text += "\n\nГотовы оформить заказ?"
         keyboard = [
             [InlineKeyboardButton("✅ Заказать", callback_data=f'order_{key}')],
             [InlineKeyboardButton("Назад", callback_data='select_order_type')]
@@ -324,18 +379,20 @@ async def input_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['topic'] = update.message.text
     user = update.effective_user
     log_user_action(user.id, user.username, f"Тема: {update.message.text}")
-    text = "Выберите срок сдачи (дольше = дешевле + бонус!):"
-    today = datetime.now()
-    keyboard = []
-    for i in range(1, 31, 5):  
-        row = []
-        for j in range(i, min(i+5, 31)):
-            date = today + timedelta(days=j)
-            button_text = f"{date.day} {date.strftime('%b')} ({j} дней)"
-            row.append(InlineKeyboardButton(button_text, callback_data=f'deadline_{j}'))
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("Назад", callback_data=f'type_{context.user_data["current_order_type"]}')])
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    descriptions = [
+        "Выберите срок сдачи — чем спокойнее, тем выгоднее (и бонусы за ранний заказ!):",
+        "",
+    ]
+    for preset in DEADLINE_PRESETS:
+        descriptions.append(f"{preset['label']} — {preset['badge']}")
+    text = "\n".join(descriptions)
+    back_target = context.user_data.get('current_order_type')
+    reply_markup = build_deadline_keyboard(
+        'deadline_',
+        include_back=True,
+        back_callback=f'type_{back_target}' if back_target else 'select_order_type'
+    )
+    await update.message.reply_text(text, reply_markup=reply_markup)
     return SELECT_DEADLINE
 
 # Выбор срока
@@ -344,8 +401,11 @@ async def select_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await answer_callback_query(query, context)
     data = query.data
     if data.startswith('deadline_'):
-        days = int(data[9:])
-        context.user_data['days_left'] = days
+        key = data[9:]
+        preset = get_deadline_preset(key)
+        context.user_data['deadline_key'] = key
+        context.user_data['deadline_days'] = preset['days']
+        context.user_data['deadline_label'] = preset['label']
         await query.edit_message_text("Введите дополнительные требования (или /skip):")
         return INPUT_REQUIREMENTS
     elif data.startswith('type_'):
@@ -385,39 +445,106 @@ async def input_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def prompt_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "Прикрепите файлы для задания (если есть). Отправляйте по одному."
-        " Когда закончите — отправьте /done или /skip."
+        "📎 Прикрепите файлы для задания (если есть).\n\n"
+        "• Отправляйте по одному сообщению — принимаем документы, фото, видео, аудио.\n"
+        "• Когда закончите, нажмите «Готово» или используйте /done.\n"
+        "• Если файлов нет, нажмите «Пропустить» или используйте /skip."
     )
-    await update.message.reply_text(text)
+    keyboard = InlineKeyboardMarkup([
+        [InlineKeyboardButton("✅ Готово", callback_data='files_done')],
+        [InlineKeyboardButton("⏭ Пропустить", callback_data='files_skip')]
+    ])
+    await update.message.reply_text(text, reply_markup=keyboard)
     return UPLOAD_FILES
 
 async def handle_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     files_list = context.user_data.setdefault('pending_files', [])
-    if update.message.document:
-        document = update.message.document
+    message = update.message
+    acknowledgement = None
+    if message.document:
+        document = message.document
         files_list.append({
             'type': 'document',
             'file_id': document.file_id,
             'file_name': document.file_name,
         })
-        await update.message.reply_text(f"Файл {document.file_name} сохранен. Прикрепите еще или отправьте /done.")
-    elif update.message.photo:
-        photo = update.message.photo[-1]
+        acknowledgement = f"📄 Файл {document.file_name or 'загружен'} сохранен."
+    elif message.photo:
+        photo = message.photo[-1]
         files_list.append({
             'type': 'photo',
             'file_id': photo.file_id,
         })
-        await update.message.reply_text("Фото сохранено. Прикрепите еще или отправьте /done.")
+        acknowledgement = "🖼 Фото сохранено."
+    elif message.audio:
+        audio = message.audio
+        files_list.append({
+            'type': 'audio',
+            'file_id': audio.file_id,
+            'file_name': audio.file_name or audio.title,
+        })
+        acknowledgement = "🎧 Аудио сохранено."
+    elif message.voice:
+        voice = message.voice
+        files_list.append({
+            'type': 'voice',
+            'file_id': voice.file_id,
+        })
+        acknowledgement = "🎙 Голосовое сообщение сохранено."
+    elif message.video:
+        video = message.video
+        files_list.append({
+            'type': 'video',
+            'file_id': video.file_id,
+            'file_name': video.file_name,
+        })
+        acknowledgement = "🎬 Видео сохранено."
+    elif message.video_note:
+        video_note = message.video_note
+        files_list.append({
+            'type': 'video_note',
+            'file_id': video_note.file_id,
+        })
+        acknowledgement = "📹 Видео-заметка сохранена."
+    elif message.animation:
+        animation = message.animation
+        files_list.append({
+            'type': 'animation',
+            'file_id': animation.file_id,
+            'file_name': animation.file_name,
+        })
+        acknowledgement = "🌀 GIF сохранен."
+    elif message.sticker:
+        sticker = message.sticker
+        files_list.append({
+            'type': 'sticker',
+            'file_id': sticker.file_id,
+            'file_emoji': sticker.emoji,
+        })
+        acknowledgement = "🔖 Стикер сохранен."
+    if acknowledgement:
+        await message.reply_text(f"{acknowledgement} Можете прикрепить еще или нажать «Готово».")
     else:
-        await update.message.reply_text("Не удалось определить файл. Попробуйте еще раз или отправьте /done.")
+        await message.reply_text("Не удалось определить файл. Попробуйте еще раз или нажмите «Готово».")
     return UPLOAD_FILES
 
 async def skip_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault('pending_files', [])
     return await add_upsell(update, context)
 
+
+async def file_upload_action(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await answer_callback_query(query, context)
+    data = query.data
+    if data == 'files_skip':
+        context.user_data['pending_files'] = []
+    elif not context.user_data.get('pending_files'):
+        context.user_data['pending_files'] = []
+    return await add_upsell(update, context)
+
 async def remind_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отправьте файл или завершите добавление через /done.")
+    await update.message.reply_text("Отправьте файл или нажмите «Готово», когда закончите (можно также использовать /done).")
     return UPLOAD_FILES
 
 # Добавление допуслуг
@@ -441,7 +568,7 @@ async def upsell_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await answer_callback_query(query, context)
     data = query.data
-    upsells = context.user_data.setdefault('upsells', set())  
+    upsells = context.user_data.setdefault('upsells', set())
     added = False
     if data == 'add_prez':
         if 'prez' not in upsells:
@@ -453,10 +580,16 @@ async def upsell_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             added = True
     elif data == 'no_upsell':
         return await process_order(update, context)
-    text = "Добавить еще? (Полный пакет экономит время!)" if added else "Уже добавлено. Добавить еще?"
+    selected = [UPSELL_LABELS.get(u, u) for u in upsells]
+    if added:
+        text = "Добавить еще опций? Полный пакет экономит время!"
+    elif upsells:
+        text = f"Вы уже выбрали: {', '.join(selected)}. Добавить что-то еще?"
+    else:
+        text = "Добавить дополнительные услуги? Полный пакет экономит время!"
     keyboard = [
-        [InlineKeyboardButton("Презентация (+2000₽)", callback_data='add_prez')],
-        [InlineKeyboardButton("Речь (+1000₽)", callback_data='add_speech')],
+        [InlineKeyboardButton(f"{'✅ ' if 'prez' in upsells else ''}Презентация (+2000₽)", callback_data='add_prez')],
+        [InlineKeyboardButton(f"{'✅ ' if 'speech' in upsells else ''}Речь (+1000₽)", callback_data='add_speech')],
         [InlineKeyboardButton("Продолжить", callback_data='no_upsell')]
     ]
     try:
@@ -473,19 +606,24 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text("Ошибка: неверный тип заказа.")
         return ConversationHandler.END
     topic = context.user_data.get('topic', 'Без темы')
-    days_left = context.user_data.get('days_left', 14)
+    deadline_key = context.user_data.get('deadline_key', DEFAULT_DEADLINE_KEY)
+    preset = get_deadline_preset(deadline_key)
+    deadline_days = preset['days']
+    deadline_label = context.user_data.get('deadline_label', preset['label'])
     requirements = context.user_data.get('requirements', 'Нет')
     contact = context.user_data.get('contact', '')
     contact_link = context.user_data.get('contact_link')
     files = list(context.user_data.get('pending_files', []))
     upsells = list(context.user_data.get('upsells', set()))
-    price = calculate_price(type_key, days_left)
-    extra = len(upsells) * 1000
+    price = calculate_price(type_key, deadline_key)
+    extra = sum(UPSELL_PRICES.get(u, 0) for u in upsells)
     price += extra
     order = {
         'type': type_key,
         'topic': topic,
-        'deadline_days': days_left,
+        'deadline_key': deadline_key,
+        'deadline_days': deadline_days,
+        'deadline_label': deadline_label,
         'requirements': requirements,
         'upsells': upsells,
         'price': price,
@@ -497,7 +635,9 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data.setdefault('cart', []).append(order)
     context.user_data.pop('upsells', None)
     context.user_data.pop('requirements', None)
-    context.user_data.pop('days_left', None)
+    context.user_data.pop('deadline_key', None)
+    context.user_data.pop('deadline_days', None)
+    context.user_data.pop('deadline_label', None)
     context.user_data.pop('topic', None)
     context.user_data.pop('current_order_type', None)
     context.user_data.pop('contact', None)
@@ -533,27 +673,43 @@ async def confirm_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not cart:
         await query.edit_message_text("Корзина пуста.")
         return await main_menu(update, context)
-    text = "Ваша корзина (подтвердите для специального бонуса!):\n"
+    text_lines = ["<b>Ваша корзина (подтвердите для специального бонуса!):</b>"]
     total = 0
     for i, order in enumerate(cart, 1):
         order_name = ORDER_TYPES.get(order['type'], {}).get('name', 'Неизвестно')
         contact_display = order.get('contact', 'Не указан')
-        text += (
-            f"{i}. {order_name} - {order['topic']} - {order['price']} ₽\n"
-            f"   Срок: {order.get('deadline_days', 0)} дней\n"
-            f"   Контакт: {contact_display}\n"
-        )
+        deadline_display = order.get('deadline_label') or f"{order.get('deadline_days', 0)} дней"
+        contact_link = order.get('contact_link')
+        if contact_link:
+            contact_html = f"<a href=\"{html.escape(contact_link, quote=True)}\">{html.escape(contact_display)}</a>"
+        else:
+            contact_html = html.escape(contact_display)
+        upsell_titles = [UPSELL_LABELS.get(u, u) for u in order.get('upsells', [])]
+        if upsell_titles:
+            upsell_html = html.escape(', '.join(upsell_titles))
+        else:
+            upsell_html = 'нет'
+        text_lines.extend([
+            f"{i}. <b>{html.escape(order_name)}</b> — {html.escape(order.get('topic', 'Без темы'))} — {order['price']} ₽",
+            f"&nbsp;&nbsp;Срок: {html.escape(deadline_display)}",
+            f"&nbsp;&nbsp;Контакт: {contact_html}",
+            f"&nbsp;&nbsp;Допы: {upsell_html}",
+        ])
+        if order.get('files'):
+            text_lines.append(f"&nbsp;&nbsp;Файлы: {len(order['files'])} шт.")
         total += order['price']
     if len(cart) > 1:
-        discount = total * 0.1
+        discount = round_price(total * 0.1)
         total -= discount
-        text += f"Скидка за несколько заказов: -{discount} ₽\n"
-    text += f"Итого: {total} ₽\nПодтвердить?"
+        text_lines.append(f"Скидка за несколько заказов: -{discount} ₽")
+    text_lines.append(f"<b>Итого: {total} ₽</b>")
+    text_lines.append("Подтвердить?")
+    text = "\n".join(text_lines)
     keyboard = [
         [InlineKeyboardButton("Подтвердить", callback_data='place_order')],
         [InlineKeyboardButton("Отменить", callback_data='cancel_cart')]
     ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
     return CONFIRM_CART
 
 async def confirm_cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -603,10 +759,11 @@ async def notify_admin_about_order(update: Update, context: ContextTypes.DEFAULT
             contact_html = html.escape(contact_display)
         upsell_titles = [UPSELL_LABELS.get(u, u) for u in order.get('upsells', [])]
         upsell_text = ', '.join(upsell_titles) if upsell_titles else 'нет'
+        deadline_display = order.get('deadline_label') or f"{order.get('deadline_days', 0)} дней"
         block = (
             f"#{order.get('order_id', 'N/A')} — {html.escape(order_name)}\n"
             f"Тема: {html.escape(order.get('topic', 'Без темы'))}\n"
-            f"Срок: {order.get('deadline_days', 0)} дней\n"
+            f"Срок: {html.escape(deadline_display)}\n"
             f"Контакт клиента: {contact_html}\n"
             f"Допы: {html.escape(upsell_text)}\n"
             f"Требования: {html.escape(order.get('requirements', 'Нет'))}\n"
@@ -621,13 +778,40 @@ async def notify_admin_about_order(update: Update, context: ContextTypes.DEFAULT
         order_name = ORDER_TYPES.get(order.get('type'), {}).get('name', 'Неизвестно')
         caption_base = f"Файлы для заказа #{order.get('order_id', 'N/A')} — {order_name}"
         for file_info in order.get('files', []):
-            if file_info.get('type') == 'document':
+            file_type = file_info.get('type')
+            file_id = file_info.get('file_id')
+            if not file_id:
+                continue
+            if file_type == 'document':
                 caption = caption_base
                 if file_info.get('file_name'):
                     caption += f"\n{file_info['file_name']}"
-                await context.bot.send_document(ADMIN_CHAT_ID, file_info['file_id'], caption=caption)
-            elif file_info.get('type') == 'photo':
-                await context.bot.send_photo(ADMIN_CHAT_ID, file_info['file_id'], caption=caption_base)
+                await context.bot.send_document(ADMIN_CHAT_ID, file_id, caption=caption)
+            elif file_type == 'photo':
+                await context.bot.send_photo(ADMIN_CHAT_ID, file_id, caption=caption_base)
+            elif file_type == 'audio':
+                caption = caption_base
+                if file_info.get('file_name'):
+                    caption += f"\n{file_info['file_name']}"
+                await context.bot.send_audio(ADMIN_CHAT_ID, file_id, caption=caption)
+            elif file_type == 'voice':
+                await context.bot.send_voice(ADMIN_CHAT_ID, file_id, caption=caption_base)
+            elif file_type == 'video':
+                caption = caption_base
+                if file_info.get('file_name'):
+                    caption += f"\n{file_info['file_name']}"
+                await context.bot.send_video(ADMIN_CHAT_ID, file_id, caption=caption)
+            elif file_type == 'video_note':
+                await context.bot.send_video_note(ADMIN_CHAT_ID, file_id)
+                await context.bot.send_message(ADMIN_CHAT_ID, caption_base)
+            elif file_type == 'animation':
+                caption = caption_base
+                if file_info.get('file_name'):
+                    caption += f"\n{file_info['file_name']}"
+                await context.bot.send_animation(ADMIN_CHAT_ID, file_id, caption=caption)
+            elif file_type == 'sticker':
+                await context.bot.send_sticker(ADMIN_CHAT_ID, file_id)
+                await context.bot.send_message(ADMIN_CHAT_ID, caption_base)
 
 # Показ прайс-листа
 async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -640,8 +824,22 @@ async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not val:
             await query.edit_message_text("Ошибка: неизвестный тип.")
             return SHOW_PRICE_LIST
-        prices = PRICES.get(key, {'min': 0, 'max': 0})
-        text = f"{val.get('icon', '')} *{val.get('name', '')}*\n\n{val.get('description', '')}\n{val.get('details', '')}\nПримеры: {', '.join(val.get('examples', []))}\nЦена: {prices['min']}-{prices['max']} ₽\n\nЗакажите со скидкой!"
+        prices = PRICES.get(key, {})
+        min_price = prices.get('min') or prices.get('base')
+        rush_price = calculate_price(key, '24h') if prices else None
+        text_lines = [
+            f"{val.get('icon', '')} *{val.get('name', '')}*",
+            "",
+            val.get('description', ''),
+            val.get('details', ''),
+            f"Примеры: {', '.join(val.get('examples', []))}",
+        ]
+        if min_price:
+            text_lines.append(f"Минимальная стоимость: {min_price} ₽")
+        if rush_price and rush_price != min_price:
+            text_lines.append(f"Срочный заказ (24 часа или меньше): {rush_price} ₽")
+        text_lines.append("\nЗакажите со скидкой!")
+        text = "\n".join(filter(None, text_lines))
         keyboard = [
             [InlineKeyboardButton("Рассчитать", callback_data='price_calculator')],
             [InlineKeyboardButton("Заказать", callback_data=f'type_{key}')],
@@ -659,8 +857,9 @@ async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(user.id, user.username, "Прайс-лист")
     text = "💲 Прайс-лист (10% скидка сегодня! 🔥):\n\n"
     for key, val in ORDER_TYPES.items():
-        prices = PRICES.get(key, {'base': 0})
-        text += f"{val['icon']} *{val['name']}* — от {prices['base']} ₽\n"
+        prices = PRICES.get(key, {})
+        min_price = prices.get('min') or prices.get('base', 0)
+        text += f"{val['icon']} *{val['name']}* — от {min_price} ₽\n"
     keyboard = [[InlineKeyboardButton(f"Подробности {val['name']}", callback_data=f'price_detail_{key}')] for key, val in ORDER_TYPES.items()]
     keyboard.append([InlineKeyboardButton("🧮 Рассчитать цену", callback_data='price_calculator')])
     keyboard.append([InlineKeyboardButton("⬅️ Меню", callback_data='back_to_main')])
@@ -677,14 +876,15 @@ async def price_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith('calc_type_'):
         key = data[10:]
         context.user_data['calc_type'] = key
-        text = f"Тип: {ORDER_TYPES.get(key, {}).get('name', 'Неизвестно')}\nВыберите срок (дольше = дешевле):"
-        keyboard = [
-            [InlineKeyboardButton("3 дня (+30%)", callback_data='calc_dead_3')],
-            [InlineKeyboardButton("7 дней (+15%)", callback_data='calc_dead_7'), InlineKeyboardButton("14 дней (базовая)", callback_data='calc_dead_14')],
-            [InlineKeyboardButton("30 дней (скидка!)", callback_data='calc_dead_30')],
-            [InlineKeyboardButton("Назад", callback_data='price_calculator')]
+        descriptions = [
+            f"Тип: {ORDER_TYPES.get(key, {}).get('name', 'Неизвестно')}",
+            "Выберите срок — спокойные сроки дают бонусы:",
+            "",
         ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+        for preset in DEADLINE_PRESETS:
+            descriptions.append(f"{preset['label']} — {preset['badge']}")
+        reply_markup = build_deadline_keyboard('calc_dead_', include_back=True, back_callback='price_calculator')
+        await query.edit_message_text("\n".join(descriptions), reply_markup=reply_markup)
         return SELECT_CALC_DEADLINE
     elif data == 'back_to_main':
         return await main_menu(update, context)
@@ -701,13 +901,16 @@ async def calc_select_deadline(update: Update, context: ContextTypes.DEFAULT_TYP
     await answer_callback_query(query, context)
     data = query.data
     if data.startswith('calc_dead_'):
-        days = int(data[10:])
-        context.user_data['calc_days'] = days
-        text = f"Срок: {days} дней\nВыберите сложность:"
+        key = data[10:]
+        preset = get_deadline_preset(key)
+        context.user_data['calc_deadline_key'] = key
+        text = f"Срок: {preset['label']}\n{preset['badge']}\n\nВыберите сложность:"
+        calc_type = context.user_data.get('calc_type')
+        back_target = f'calc_type_{calc_type}' if calc_type else 'price_calculator'
         keyboard = [
             [InlineKeyboardButton("Простая (базовая)", callback_data='calc_comp_1.0')],
             [InlineKeyboardButton("Средняя (+10%)", callback_data='calc_comp_1.1'), InlineKeyboardButton("Сложная (+30%)", callback_data='calc_comp_1.3')],
-            [InlineKeyboardButton("Назад", callback_data=f'calc_type_{context.user_data["calc_type"]}')]
+            [InlineKeyboardButton("Назад", callback_data=back_target)]
         ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
         return SELECT_CALC_COMPLEXITY
@@ -718,12 +921,27 @@ async def calc_select_complexity(update: Update, context: ContextTypes.DEFAULT_T
     await answer_callback_query(query, context)
     data = query.data
     if data.startswith('calc_comp_'):
-        comp = float(data[10:])
+        comp_key = data[10:]
+        comp = float(comp_key)
         key = context.user_data.get('calc_type')
-        days = context.user_data.get('calc_days', 14)
-        price = calculate_price(key, days, comp)
+        if not key:
+            return await price_calculator(update, context)
+        deadline_key = context.user_data.get('calc_deadline_key', DEFAULT_DEADLINE_KEY)
+        preset = get_deadline_preset(deadline_key)
+        price = calculate_price(key, deadline_key, comp)
         name = ORDER_TYPES.get(key, {}).get('name', 'Неизвестно')
-        text = f"Расчет: {name}\nСрок: {days} дней\nСложность: {int((comp-1)*100)}%\nЦена: {price} ₽ (Скидка сегодня!)\n\nЗаказать?"
+        complexity_labels = {
+            '1.0': 'Простая (базовая)',
+            '1.1': 'Средняя (+10%)',
+            '1.3': 'Сложная (+30%)',
+        }
+        complexity_text = complexity_labels.get(comp_key, f"{int((comp - 1) * 100)}%")
+        text = (
+            f"Расчет: {name}\n"
+            f"Срок: {preset['label']}\n"
+            f"Сложность: {complexity_text}\n"
+            f"Цена: {price} ₽ (Скидка сегодня!)\n\nЗаказать?"
+        )
         keyboard = [
             [InlineKeyboardButton("📝 Заказать", callback_data=f'type_{key}')],
             [InlineKeyboardButton("Пересчитать", callback_data='price_calculator'), InlineKeyboardButton("Меню", callback_data='back_to_main')]
@@ -881,12 +1099,13 @@ async def admin_view_order(update: Update, context: ContextTypes.DEFAULT_TYPE, u
     upsell_text = ', '.join(upsell_titles) if upsell_titles else 'нет'
     files_count = len(order.get('files', [])) if order.get('files') else 0
     user_link = f"tg://user?id={user_id}"
+    deadline_display = order.get('deadline_label') or f"{order.get('deadline_days', 0)} дней"
     text = (
         f"Заказ #{order.get('order_id', 'N/A')} от <a href=\"{user_link}\">{user_id}</a>\n"
         f"Тип: {html.escape(order_name)}\n"
         f"Статус: {html.escape(order.get('status', 'новый'))}\n"
         f"Тема: {html.escape(order.get('topic', 'Без темы'))}\n"
-        f"Срок: {order.get('deadline_days', 0)} дней\n"
+        f"Срок: {html.escape(deadline_display)}\n"
         f"Контакт: {contact_html}\n"
         f"Допы: {html.escape(upsell_text)}\n"
         f"Требования: {html.escape(order.get('requirements', 'Нет'))}\n"
@@ -1014,7 +1233,20 @@ def main():
             INPUT_REQUIREMENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_requirements), CommandHandler('skip', skip_requirements)],
             INPUT_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_contact)],
             UPLOAD_FILES: [
-                MessageHandler((filters.Document.ALL | filters.PHOTO), handle_file_upload),
+                CallbackQueryHandler(file_upload_action, pattern='^files_(done|skip)$'),
+                MessageHandler(
+                    (
+                        filters.Document.ALL
+                        | filters.PHOTO
+                        | filters.AUDIO
+                        | filters.VOICE
+                        | filters.VIDEO
+                        | filters.VIDEO_NOTE
+                        | filters.ANIMATION
+                        | filters.Sticker.ALL
+                    ),
+                    handle_file_upload,
+                ),
                 CommandHandler('skip', skip_file_upload),
                 CommandHandler('done', skip_file_upload),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, remind_file_upload),
