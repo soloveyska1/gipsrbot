@@ -42,6 +42,7 @@ PRICES_FILE = os.path.join(DATA_DIR, 'prices.json')
 REFERRALS_FILE = os.path.join(DATA_DIR, 'referrals.json')
 ORDERS_FILE = os.path.join(DATA_DIR, 'orders.json')
 FEEDBACKS_FILE = os.path.join(DATA_DIR, 'feedbacks.json')
+BONUSES_FILE = os.path.join(DATA_DIR, 'bonuses.json')
 USER_LOGS_FILE = os.path.join(DATA_DIR, 'user_logs.json')
 
 # Функции загрузки/сохранения с обработкой ошибок
@@ -112,6 +113,7 @@ PRICES = normalize_prices(load_json(PRICES_FILE, {}))
 REFERALS = load_json(REFERRALS_FILE)
 ORDERS = load_json(ORDERS_FILE)
 FEEDBACKS = load_json(FEEDBACKS_FILE)
+BONUSES = load_json(BONUSES_FILE)
 USER_LOGS = load_json(USER_LOGS_FILE)
 
 ORDER_TYPES = {
@@ -185,6 +187,8 @@ UPSELL_PRICES = {
     'prez': 2000,
     'speech': 1000,
 }
+
+FEEDBACK_BONUS_AMOUNT = 200
 
 DEADLINE_PRESETS = [
     {
@@ -268,7 +272,33 @@ FAQ_ITEMS = [
 current_pricing_mode = 'light'
 
 # Состояния
-SELECT_MAIN_MENU, SELECT_ORDER_TYPE, VIEW_ORDER_DETAILS, INPUT_TOPIC, SELECT_DEADLINE, INPUT_REQUIREMENTS, INPUT_CONTACT, UPLOAD_FILES, ADD_UPSSELL, ADD_ANOTHER_ORDER, CONFIRM_CART, ADMIN_MENU, PROFILE_MENU, SHOW_PRICE_LIST, PRICE_CALCULATOR, SELECT_CALC_DEADLINE, SELECT_CALC_COMPLEXITY, SHOW_FAQ, FAQ_DETAILS, SHOW_ORDERS, LEAVE_FEEDBACK, INPUT_FEEDBACK = range(22)
+(
+    SELECT_MAIN_MENU,
+    SELECT_ORDER_TYPE,
+    VIEW_ORDER_DETAILS,
+    INPUT_TOPIC,
+    SELECT_DEADLINE,
+    INPUT_REQUIREMENTS,
+    INPUT_CONTACT,
+    UPLOAD_FILES,
+    ADD_UPSSELL,
+    ADD_ANOTHER_ORDER,
+    CONFIRM_CART,
+    ADMIN_MENU,
+    PROFILE_MENU,
+    SHOW_PRICE_LIST,
+    PRICE_CALCULATOR,
+    SELECT_CALC_DEADLINE,
+    SELECT_CALC_COMPLEXITY,
+    SHOW_FAQ,
+    FAQ_DETAILS,
+    PROFILE_ORDERS,
+    PROFILE_ORDER_DETAIL,
+    PROFILE_FEEDBACKS,
+    PROFILE_FEEDBACK_INPUT,
+    PROFILE_REFERRALS,
+    PROFILE_BONUSES,
+) = range(25)
 
 # Логирование действий пользователя
 def log_user_action(user_id, username, action):
@@ -285,6 +315,179 @@ async def answer_callback_query(query, context):
         return
     await query.answer()
     context.user_data['_last_answered_query'] = query.id
+
+
+def ensure_bonus_account(user_id: str):
+    user_key = str(user_id)
+    entry = BONUSES.setdefault(user_key, {})
+    changed = False
+    credited = entry.get('credited', 0)
+    redeemed = entry.get('redeemed', 0)
+    history = entry.get('history', [])
+    balance = entry.get('balance')
+    try:
+        credited = int(credited)
+    except (TypeError, ValueError):
+        credited = 0
+        changed = True
+    try:
+        redeemed = int(redeemed)
+    except (TypeError, ValueError):
+        redeemed = 0
+        changed = True
+    if not isinstance(history, list):
+        history = []
+        changed = True
+    calculated_balance = credited - redeemed
+    try:
+        balance = int(balance)
+    except (TypeError, ValueError):
+        balance = calculated_balance
+        changed = True
+    if balance != calculated_balance:
+        balance = calculated_balance
+        changed = True
+    entry.update({
+        'credited': credited,
+        'redeemed': redeemed,
+        'balance': balance,
+        'history': history,
+    })
+    if changed:
+        save_json(BONUSES_FILE, BONUSES)
+    return entry
+
+
+def get_bonus_summary(user_id: str):
+    entry = ensure_bonus_account(user_id)
+    return (
+        entry.get('credited', 0),
+        entry.get('redeemed', 0),
+        entry.get('balance', 0),
+        entry.get('history', []),
+    )
+
+
+def add_bonus_operation(user_id: str, amount: int, operation_type: str, reason: str):
+    amount = int(amount)
+    entry = ensure_bonus_account(user_id)
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    if operation_type == 'credit':
+        entry['credited'] += amount
+        entry['balance'] += amount
+    elif operation_type == 'debit':
+        entry['redeemed'] += amount
+        entry['balance'] = max(0, entry['balance'] - amount)
+    entry.setdefault('history', []).append({
+        'type': operation_type,
+        'amount': amount,
+        'reason': reason,
+        'timestamp': timestamp,
+    })
+    save_json(BONUSES_FILE, BONUSES)
+
+
+def get_feedback_entries(user_id: str):
+    items = FEEDBACKS.get(str(user_id), [])
+    normalized = []
+    for entry in items:
+        if isinstance(entry, dict):
+            text = entry.get('text', '')
+            created_at = entry.get('created_at')
+        else:
+            text = str(entry)
+            created_at = None
+        normalized.append({'text': text, 'created_at': created_at})
+    return normalized
+
+
+def save_feedback_entries(user_id: str, entries):
+    FEEDBACKS[str(user_id)] = entries
+    save_json(FEEDBACKS_FILE, FEEDBACKS)
+
+
+def truncate_for_button(text: str, limit: int = 32) -> str:
+    clean = text.replace('\n', ' ').strip()
+    if len(clean) <= limit:
+        return clean
+    return clean[: limit - 1] + '…'
+
+
+def is_order_paused(order: dict) -> bool:
+    status = str(order.get('status', '')).lower()
+    return bool(order.get('client_paused')) or status.startswith('на паузе')
+
+
+def build_order_status(order: dict) -> str:
+    status = order.get('status') or 'без статуса'
+    if is_order_paused(order):
+        return f"{status} · на паузе"
+    return status
+
+
+def build_order_detail_text(order: dict) -> str:
+    order_name = ORDER_TYPES.get(order.get('type'), {}).get('name', 'Неизвестный тип')
+    topic = order.get('topic', 'Без темы')
+    deadline_display = order.get('deadline_label') or f"{order.get('deadline_days', '—')} дней"
+    upsell_titles = [UPSELL_LABELS.get(u, u) for u in order.get('upsells', [])]
+    upsell_text = ', '.join(upsell_titles) if upsell_titles else 'нет'
+    contact_display = html.escape(order.get('contact', 'Не указан'))
+    contact_link = order.get('contact_link')
+    if contact_link:
+        contact_html = f"<a href=\"{html.escape(contact_link, quote=True)}\">{contact_display}</a>"
+    else:
+        contact_html = contact_display
+    requirements = html.escape(order.get('requirements', 'Нет'))
+    files_count = len(order.get('files', [])) if order.get('files') else 0
+    lines = [
+        f"<b>{html.escape(order_name)}</b>",
+        f"Тема: {html.escape(topic)}",
+        f"Статус: {html.escape(build_order_status(order))}",
+        f"Срок: {html.escape(deadline_display)}",
+        f"Контакт: {contact_html}",
+        f"Допы: {html.escape(upsell_text)}",
+        f"Стоимость: {order.get('price', 0)} ₽",
+        f"Требования: {requirements}",
+    ]
+    if files_count:
+        lines.append(f"Файлы: {files_count} шт.")
+    return "\n".join(lines)
+
+
+def find_user_order(user_id: str, order_id: str):
+    user_orders = ORDERS.get(str(user_id), [])
+    for order in user_orders:
+        if str(order.get('order_id')) == str(order_id):
+            return order, user_orders
+    return None, user_orders
+
+
+async def edit_or_send(update: Update, context: ContextTypes.DEFAULT_TYPE, text: str, keyboard=None, parse_mode=ParseMode.HTML):
+    reply_markup = InlineKeyboardMarkup(keyboard) if keyboard else None
+    if update.callback_query:
+        query = update.callback_query
+        await query.edit_message_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            disable_web_page_preview=True,
+        )
+    elif update.message:
+        await update.message.reply_text(
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            disable_web_page_preview=True,
+        )
+    else:
+        chat_id = update.effective_chat.id
+        await context.bot.send_message(
+            chat_id,
+            text,
+            reply_markup=reply_markup,
+            parse_mode=parse_mode,
+            disable_web_page_preview=True,
+        )
 
 def build_contact_link(contact_text):
     if not contact_text:
@@ -1004,6 +1207,33 @@ async def notify_admin_about_order(update: Update, context: ContextTypes.DEFAULT
                 await context.bot.send_sticker(ADMIN_CHAT_ID, file_id)
                 await context.bot.send_message(ADMIN_CHAT_ID, caption_base)
 
+
+async def notify_admin_order_event(context: ContextTypes.DEFAULT_TYPE, user, order: dict, action: str, extra_note: Optional[str] = None):
+    if not ADMIN_CHAT_ID:
+        return
+    user_link = get_user_link(user)
+    user_name = html.escape(user.full_name or user.first_name or str(user.id))
+    order_id = html.escape(str(order.get('order_id', 'N/A')))
+    order_name = html.escape(ORDER_TYPES.get(order.get('type'), {}).get('name', 'Неизвестный тип'))
+    status_html = html.escape(build_order_status(order))
+    deadline_display = order.get('deadline_label') or f"{order.get('deadline_days', '—')} дней"
+    contact_display = order.get('contact', 'Не указан')
+    contact_link = order.get('contact_link')
+    if contact_link:
+        contact_html = f"<a href=\"{html.escape(contact_link, quote=True)}\">{html.escape(contact_display)}</a>"
+    else:
+        contact_html = html.escape(contact_display)
+    lines = [
+        f"ℹ️ Клиент <a href=\"{html.escape(user_link, quote=True)}\">{user_name}</a> {html.escape(action)} заказ #{order_id} — {order_name}.",
+        f"Статус: {status_html}.",
+        f"Срок: {html.escape(deadline_display)}",
+        f"Контакт клиента: {contact_html}",
+    ]
+    if extra_note:
+        lines.append(html.escape(extra_note))
+    await context.bot.send_message(ADMIN_CHAT_ID, "\n".join(lines), parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+
+
 # Показ прайс-листа
 async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -1144,59 +1374,357 @@ async def calc_select_complexity(update: Update, context: ContextTypes.DEFAULT_T
 # Показ профиля
 async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await answer_callback_query(query, context)
-    data = query.data
+    data = query.data if query else None
+    if query:
+        await answer_callback_query(query, context)
     user = update.effective_user
-    user_id = str(user.id)
-    if data == 'my_orders':
-        return await show_orders(update, context)
-    elif data == 'leave_feedback':
-        await query.edit_message_text("Введите ваш отзыв:")
-        return INPUT_FEEDBACK
-    elif data == 'back_to_main':
+    if data in (None, 'profile', 'profile_main', 'profile_home'):
+        if data == 'profile':
+            log_user_action(user.id, user.username, "Профиль")
+        return await render_profile_main(update, context)
+    if data == 'profile_back' or data == 'back_to_main':
         return await main_menu(update, context)
-    log_user_action(user.id, user.username, "Профиль")
-    orders_count = len(ORDERS.get(user_id, []))
-    feedbacks_count = len(FEEDBACKS.get(user_id, []))
-    refs_count = len(REFERALS.get(user_id, []))
-    ref_link = context.user_data.get('ref_link', 'Нет ссылки')
-    text = f"👤 Профиль {user.first_name}\n\nЗаказов: {orders_count}\nОтзывов: {feedbacks_count}\nРефералов: {refs_count}\nРеф. ссылка: {ref_link}\n\nПриглашайте друзей за бонусы!"
-    keyboard = [
-        [InlineKeyboardButton("📋 Мои заказы", callback_data='my_orders')],
-        [InlineKeyboardButton("⭐ Оставить отзыв", callback_data='leave_feedback')],
-        [InlineKeyboardButton("⬅️ Меню", callback_data='back_to_main')]
-    ]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    return PROFILE_MENU
+    if data == 'profile_orders':
+        return await profile_show_orders(update, context)
+    if data and data.startswith('profile_order_pause_'):
+        order_id = data.rsplit('_', 1)[-1]
+        return await profile_toggle_order_pause(update, context, order_id)
+    if data and data.startswith('profile_order_delete_'):
+        order_id = data.rsplit('_', 1)[-1]
+        return await profile_delete_order(update, context, order_id)
+    if data and data.startswith('profile_order_remind_'):
+        order_id = data.rsplit('_', 1)[-1]
+        return await profile_remind_order(update, context, order_id)
+    if data and data.startswith('profile_order_'):
+        order_id = data.rsplit('_', 1)[-1]
+        return await profile_show_order_detail(update, context, order_id)
+    if data == 'profile_feedbacks':
+        return await profile_show_feedbacks(update, context)
+    if data == 'profile_feedback_add':
+        return await profile_prompt_feedback(update, context)
+    if data and data.startswith('profile_feedback_delete_'):
+        index_key = data.rsplit('_', 1)[-1]
+        return await profile_delete_feedback(update, context, index_key)
+    if data == 'profile_referrals':
+        return await profile_show_referrals(update, context)
+    if data == 'profile_bonuses':
+        return await profile_show_bonuses(update, context)
+    return await render_profile_main(update, context)
 
 # Показ заказов
-async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await answer_callback_query(query, context)
-    data = query.data
-    if data == 'profile':
-        return await show_profile(update, context)
-    user_id = str(update.effective_user.id)
-    user_orders = ORDERS.get(user_id, [])
-    if not user_orders:
-        text = "Пока нет заказов. Сделайте заказ сейчас!"
-    else:
-        text = "Ваши заказы:\n"
-        for order in user_orders:
-            name = ORDER_TYPES.get(order.get('type'), {}).get('name', 'Неизвестно')
-            text += f"#{order.get('order_id', 'N/A')}: {name} - {order.get('status', 'новый')}\n"
-    keyboard = [[InlineKeyboardButton("Назад", callback_data='profile')]]
-    await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    return SHOW_ORDERS
 
-# Ввод отзыва
+
+async def render_profile_main(update: Update, context: ContextTypes.DEFAULT_TYPE, notice: Optional[str] = None):
+    user = update.effective_user
+    user_id = str(user.id)
+    orders = ORDERS.get(user_id, [])
+    feedbacks = get_feedback_entries(user_id)
+    referrals = REFERALS.get(user_id, [])
+    credited, redeemed, balance, _ = get_bonus_summary(user_id)
+    ref_link = context.user_data.get('ref_link')
+    if not ref_link:
+        bot_username = (await context.bot.get_me()).username
+        ref_link = f"https://t.me/{bot_username}?start={user_id}"
+        context.user_data['ref_link'] = ref_link
+    lines = [f"👤 <b>{html.escape(user.full_name or user.first_name or 'Профиль')}</b>"]
+    if notice:
+        lines.append(f"<i>{html.escape(notice)}</i>")
+    lines.extend([
+        f"\n📦 Заказы: {len(orders)}",
+        f"⭐ Отзывы: {len(feedbacks)}",
+        f"👥 Рефералы: {len(referrals)}",
+        f"🎁 Бонусы: {balance} ₽ (начислено {credited} ₽ / списано {redeemed} ₽)",
+        "",
+        "Приглашайте друзей и копите бонусы за их заказы!",
+        f"Реферальная ссылка: <a href=\"{html.escape(ref_link, quote=True)}\">{html.escape(ref_link)}</a>",
+    ])
+    keyboard = [
+        [InlineKeyboardButton("📦 Мои заказы", callback_data='profile_orders')],
+        [InlineKeyboardButton("⭐ Отзывы", callback_data='profile_feedbacks')],
+        [InlineKeyboardButton("👥 Рефералы", callback_data='profile_referrals'), InlineKeyboardButton("🎁 Бонусы", callback_data='profile_bonuses')],
+        [InlineKeyboardButton("⬅️ Меню", callback_data='back_to_main')],
+    ]
+    await edit_or_send(update, context, "\n".join(lines), keyboard)
+    return PROFILE_MENU
+
+
+async def profile_show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE, notice: Optional[str] = None):
+    user = update.effective_user
+    user_id = str(user.id)
+    log_user_action(user.id, user.username, "Профиль: список заказов")
+    orders = sorted(ORDERS.get(user_id, []), key=lambda o: o.get('order_id', 0))
+    lines = ["📦 <b>Ваши заказы</b>"]
+    if notice:
+        lines.append(f"<i>{html.escape(notice)}</i>")
+    if not orders:
+        lines.append("Пока заказов нет. Оформите первый заказ через раздел «Сделать заказ».")
+    else:
+        for order in orders:
+            order_id = order.get('order_id', '—')
+            order_name = ORDER_TYPES.get(order.get('type'), {}).get('name', 'Неизвестный тип')
+            status = build_order_status(order)
+            lines.append(
+                f"• #{html.escape(str(order_id))} — {html.escape(order_name)} ({html.escape(status)})"
+            )
+    keyboard = []
+    for order in orders:
+        order_id = order.get('order_id')
+        if order_id is None:
+            continue
+        order_name = ORDER_TYPES.get(order.get('type'), {}).get('name', 'Заказ')
+        prefix = '⏸ ' if is_order_paused(order) else ''
+        label = f"{prefix}#{order_id} · {truncate_for_button(order_name)}"
+        keyboard.append([InlineKeyboardButton(label, callback_data=f'profile_order_{order_id}')])
+    keyboard.append([InlineKeyboardButton("⬅️ Профиль", callback_data='profile')])
+    await edit_or_send(update, context, "\n".join(lines), keyboard)
+    return PROFILE_ORDERS
+
+
+async def profile_show_order_detail(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str, notice: Optional[str] = None):
+    user = update.effective_user
+    order, _ = find_user_order(user.id, order_id)
+    if not order:
+        return await profile_show_orders(update, context, notice="Заказ не найден или уже удалён.")
+    log_user_action(user.id, user.username, f"Профиль: заказ #{order_id}")
+    order_number = html.escape(str(order.get('order_id', order_id)))
+    header = f"📦 <b>Заказ #{order_number}</b>"
+    details = build_order_detail_text(order)
+    parts = [header]
+    if notice:
+        parts.append(f"<i>{html.escape(notice)}</i>")
+    parts.append(details)
+    pause_label = "▶️ Возобновить" if is_order_paused(order) else "⏸ Пауза"
+    keyboard = [
+        [InlineKeyboardButton(pause_label, callback_data=f'profile_order_pause_{order_id}')],
+        [InlineKeyboardButton("🔔 Напомнить менеджеру", callback_data=f'profile_order_remind_{order_id}')],
+        [InlineKeyboardButton("🗑 Удалить заказ", callback_data=f'profile_order_delete_{order_id}')],
+        [InlineKeyboardButton("⬅️ К заказам", callback_data='profile_orders')],
+        [InlineKeyboardButton("🏠 Профиль", callback_data='profile')],
+    ]
+    await edit_or_send(update, context, "\n\n".join(parts), keyboard)
+    return PROFILE_ORDER_DETAIL
+
+
+async def profile_toggle_order_pause(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str):
+    user = update.effective_user
+    order, _ = find_user_order(user.id, order_id)
+    if not order:
+        return await profile_show_orders(update, context, notice="Заказ не найден.")
+    if is_order_paused(order):
+        previous = order.get('status_before_pause', 'в работе')
+        order['status'] = previous
+        order['client_paused'] = False
+        order.pop('status_before_pause', None)
+        notice = "Заказ возобновлён. Менеджер получил уведомление."
+        action = "возобновил"
+    else:
+        order['status_before_pause'] = order.get('status', 'новый')
+        order['status'] = 'на паузе (клиент)'
+        order['client_paused'] = True
+        notice = "Заказ поставлен на паузу. Мы подождём вашего сигнала."
+        action = "поставил на паузу"
+    save_json(ORDERS_FILE, ORDERS)
+    log_user_action(user.id, user.username, f"Профиль: {action} заказ #{order_id}")
+    if ADMIN_CHAT_ID:
+        await notify_admin_order_event(context, user, order, action)
+    return await profile_show_order_detail(update, context, order_id, notice=notice)
+
+
+async def profile_delete_order(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str):
+    user = update.effective_user
+    order, user_orders = find_user_order(user.id, order_id)
+    if not order:
+        return await profile_show_orders(update, context, notice="Заказ не найден.")
+    user_orders[:] = [o for o in user_orders if str(o.get('order_id')) != str(order_id)]
+    if not user_orders:
+        ORDERS.pop(str(user.id), None)
+    save_json(ORDERS_FILE, ORDERS)
+    log_user_action(user.id, user.username, f"Профиль: удалил заказ #{order_id}")
+    if ADMIN_CHAT_ID:
+        await notify_admin_order_event(context, user, order, 'удалил', extra_note='Клиент запросил отмену заказа через профиль.')
+    return await profile_show_orders(update, context, notice='Заказ удалён. Если планы изменятся — создайте новый заказ.')
+
+
+async def profile_remind_order(update: Update, context: ContextTypes.DEFAULT_TYPE, order_id: str):
+    user = update.effective_user
+    order, _ = find_user_order(user.id, order_id)
+    if not order:
+        return await profile_show_orders(update, context, notice="Заказ не найден.")
+    log_user_action(user.id, user.username, f"Профиль: напомнил о заказе #{order_id}")
+    if ADMIN_CHAT_ID:
+        deadline = order.get('deadline_label') or f"{order.get('deadline_days', '—')} дней"
+        extra = f"Напоминание от клиента. Срок: {deadline}."
+        await notify_admin_order_event(context, user, order, 'напомнил о', extra_note=extra)
+    notice = "Напоминание отправлено менеджеру. Мы скоро свяжемся!"
+    return await profile_show_order_detail(update, context, order_id, notice=notice)
+
+
+async def profile_show_feedbacks(update: Update, context: ContextTypes.DEFAULT_TYPE, notice: Optional[str] = None):
+    user = update.effective_user
+    entries = get_feedback_entries(user.id)
+    log_user_action(user.id, user.username, "Профиль: отзывы")
+    lines = ["⭐ <b>Ваши отзывы</b>"]
+    if notice:
+        lines.append(f"<i>{html.escape(notice)}</i>")
+    if not entries:
+        lines.append("Вы ещё не оставляли отзыв. Поделитесь впечатлением и получите бонусы!")
+    else:
+        for idx, entry in enumerate(entries, 1):
+            text = html.escape(entry.get('text', '')) or '—'
+            created = entry.get('created_at')
+            if created:
+                lines.append(f"{idx}. {text}\n<small>{html.escape(str(created))}</small>")
+            else:
+                lines.append(f"{idx}. {text}")
+    keyboard = [[InlineKeyboardButton("➕ Добавить отзыв", callback_data='profile_feedback_add')]]
+    if entries:
+        row = []
+        for idx in range(len(entries)):
+            row.append(InlineKeyboardButton(f"🗑 №{idx + 1}", callback_data=f'profile_feedback_delete_{idx}'))
+            if len(row) == 3:
+                keyboard.append(row)
+                row = []
+        if row:
+            keyboard.append(row)
+    keyboard.append([InlineKeyboardButton("⬅️ Профиль", callback_data='profile')])
+    await edit_or_send(update, context, "\n".join(lines), keyboard)
+    return PROFILE_FEEDBACKS
+
+
+async def profile_prompt_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    text = (
+        "⭐ <b>Оставьте отзыв</b>\n\n"
+        f"Напишите текстовым сообщением, что понравилось или что можно улучшить. За отзыв начислим {FEEDBACK_BONUS_AMOUNT} ₽ на бонусный счёт.\n\n"
+        "Чтобы отменить, нажмите «⬅️ Профиль» или отправьте /cancel."
+    )
+    keyboard = [[InlineKeyboardButton("⬅️ Профиль", callback_data='profile_feedbacks')]]
+    await edit_or_send(update, context, text, keyboard)
+    return PROFILE_FEEDBACK_INPUT
+
+
 async def input_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = str(update.effective_user.id)
-    feedback = update.message.text
-    FEEDBACKS.setdefault(user_id, []).append(feedback)
-    save_json(FEEDBACKS_FILE, FEEDBACKS)
-    await update.message.reply_text("Спасибо за отзыв! Добавлены бонусные баллы.")
-    return await show_profile(update, context)
+    user = update.effective_user
+    user_id = str(user.id)
+    text = (update.message.text or '').strip()
+    if not text:
+        await update.message.reply_text("Отзыв не может быть пустым. Попробуйте ещё раз или отправьте /cancel.")
+        return PROFILE_FEEDBACK_INPUT
+    if text.lower() in {'/cancel', 'отмена'}:
+        await update.message.reply_text("Добавление отзыва отменено.")
+        return await profile_show_feedbacks(update, context, notice='Отмена добавления отзыва.')
+    entries = get_feedback_entries(user_id)
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    entries.append({'text': text, 'created_at': timestamp})
+    save_feedback_entries(user_id, entries)
+    add_bonus_operation(user_id, FEEDBACK_BONUS_AMOUNT, 'credit', 'Отзыв клиента')
+    await update.message.reply_text(f"Спасибо за отзыв! На бонусный счёт начислено {FEEDBACK_BONUS_AMOUNT} ₽.")
+    if ADMIN_CHAT_ID:
+        user_link = get_user_link(user)
+        admin_text = (
+            f"⭐ Новый отзыв от <a href=\"{html.escape(user_link, quote=True)}\">{html.escape(user.full_name or user.first_name or user_id)}</a>\n"
+            f"Текст: {html.escape(text)}"
+        )
+        await context.bot.send_message(ADMIN_CHAT_ID, admin_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    return await profile_show_feedbacks(update, context, notice='Отзыв сохранён и передан менеджеру.')
+
+
+async def profile_delete_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE, index_key: str):
+    user = update.effective_user
+    user_id = str(user.id)
+    entries = get_feedback_entries(user_id)
+    try:
+        idx = int(index_key)
+    except (TypeError, ValueError):
+        return await profile_show_feedbacks(update, context, notice='Не удалось определить отзыв.')
+    if idx < 0 or idx >= len(entries):
+        return await profile_show_feedbacks(update, context, notice='Отзыв не найден.')
+    removed = entries.pop(idx)
+    save_feedback_entries(user_id, entries)
+    log_user_action(user.id, user.username, f"Профиль: удалил отзыв №{idx + 1}")
+    if ADMIN_CHAT_ID:
+        user_link = get_user_link(user)
+        removed_text = removed.get('text', '')
+        admin_text = (
+            f"🗑 Клиент <a href=\"{html.escape(user_link, quote=True)}\">{html.escape(user.full_name or user.first_name or user_id)}</a> удалил отзыв.\n"
+            f"Текст: {html.escape(removed_text)}"
+        )
+        await context.bot.send_message(ADMIN_CHAT_ID, admin_text, parse_mode=ParseMode.HTML, disable_web_page_preview=True)
+    return await profile_show_feedbacks(update, context, notice='Отзыв удалён.')
+
+
+async def profile_show_referrals(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = str(user.id)
+    referrals = REFERALS.get(user_id, [])
+    log_user_action(user.id, user.username, "Профиль: рефералы")
+    lines = ["👥 <b>Реферальная программа</b>"]
+    if not referrals:
+        lines.append("Пока нет приглашённых друзей. Поделитесь ссылкой и получайте бонусы с их заказов!")
+    else:
+        for idx, ref in enumerate(referrals, 1):
+            if isinstance(ref, dict):
+                name = ref.get('name') or ref.get('username') or ref.get('user_id') or f"Реферал №{idx}"
+                status = ref.get('status')
+                bonus = ref.get('bonus')
+                parts = [html.escape(str(name))]
+                extras = []
+                if status:
+                    extras.append(str(status))
+                if bonus:
+                    extras.append(f"бонус {bonus} ₽")
+                if extras:
+                    parts.append(f"({', '.join(html.escape(item) for item in extras)})")
+                lines.append(f"{idx}. {' '.join(parts)}")
+            else:
+                lines.append(f"{idx}. {html.escape(str(ref))}")
+    ref_link = context.user_data.get('ref_link')
+    if not ref_link:
+        bot_username = (await context.bot.get_me()).username
+        ref_link = f"https://t.me/{bot_username}?start={user_id}"
+        context.user_data['ref_link'] = ref_link
+    lines.extend([
+        "",
+        f"Ваша ссылка: <a href=\"{html.escape(ref_link, quote=True)}\">{html.escape(ref_link)}</a>",
+    ])
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Профиль", callback_data='profile')],
+    ]
+    await edit_or_send(update, context, "\n".join(lines), keyboard)
+    return PROFILE_REFERRALS
+
+
+async def profile_show_bonuses(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user = update.effective_user
+    user_id = str(user.id)
+    credited, redeemed, balance, history = get_bonus_summary(user_id)
+    log_user_action(user.id, user.username, "Профиль: бонусы")
+    lines = [
+        "🎁 <b>Бонусный счёт</b>",
+        f"Начислено: {credited} ₽",
+        f"Списано: {redeemed} ₽",
+        f"Актуальный баланс: {balance} ₽",
+    ]
+    if history:
+        lines.append("\nПоследние операции:")
+        for item in reversed(history[-5:]):
+            if isinstance(item, dict):
+                amount = item.get('amount', 0)
+                op_type = item.get('type')
+                sign = '+' if op_type == 'credit' else '-'
+                reason = item.get('reason', '')
+                timestamp = item.get('timestamp', '')
+                line = f"{timestamp} {sign}{amount} ₽ — {reason}".strip()
+                lines.append(html.escape(line))
+            else:
+                lines.append(html.escape(str(item)))
+    else:
+        lines.append("\nИстория операций появится после начислений.")
+    lines.append("\nБонусами можно оплатить часть следующего заказа — уточните у менеджера.")
+    keyboard = [
+        [InlineKeyboardButton("⬅️ Профиль", callback_data='profile')],
+    ]
+    await edit_or_send(update, context, "\n".join(lines), keyboard)
+    return PROFILE_BONUSES
 
 # Показ FAQ
 async def show_faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -1451,14 +1979,21 @@ def main():
             CONFIRM_CART: [CallbackQueryHandler(confirm_cart_handler)],
             ADMIN_MENU: [CallbackQueryHandler(admin_menu_handler), MessageHandler(filters.TEXT & ~filters.COMMAND, admin_message)],
             PROFILE_MENU: [CallbackQueryHandler(show_profile)],
+            PROFILE_ORDERS: [CallbackQueryHandler(show_profile)],
+            PROFILE_ORDER_DETAIL: [CallbackQueryHandler(show_profile)],
+            PROFILE_FEEDBACKS: [CallbackQueryHandler(show_profile)],
+            PROFILE_REFERRALS: [CallbackQueryHandler(show_profile)],
+            PROFILE_BONUSES: [CallbackQueryHandler(show_profile)],
             SHOW_PRICE_LIST: [CallbackQueryHandler(show_price_list)],
             PRICE_CALCULATOR: [CallbackQueryHandler(price_calculator)],
             SELECT_CALC_DEADLINE: [CallbackQueryHandler(calc_select_deadline)],
             SELECT_CALC_COMPLEXITY: [CallbackQueryHandler(calc_select_complexity)],
             SHOW_FAQ: [CallbackQueryHandler(show_faq)],
             FAQ_DETAILS: [CallbackQueryHandler(show_faq)],
-            SHOW_ORDERS: [CallbackQueryHandler(show_orders)],
-            INPUT_FEEDBACK: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_feedback)],
+            PROFILE_FEEDBACK_INPUT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, input_feedback),
+                CallbackQueryHandler(show_profile),
+            ],
         },
         fallbacks=[CommandHandler('start', start)],
     )
