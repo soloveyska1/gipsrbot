@@ -63,14 +63,52 @@ def save_json(file_path, data):
         logger.error(f"Ошибка сохранения {file_path}: {e}")
 
 # Глобальные данные
-PRICES = load_json(PRICES_FILE, {
+DEFAULT_PRICES = {
     'samostoyatelnye': {'base': 2500, 'min': 2500},
     'kursovaya_teoreticheskaya': {'base': 8000, 'min': 8000},
     'kursovaya_s_empirikov': {'base': 12000, 'min': 12000},
     'diplomnaya': {'base': 35000, 'min': 35000},
     'magisterskaya': {'base': 40000, 'min': 40000},
-    'normcontrol': {'base': 5000, 'min': 5000}
-})
+    'normcontrol': {'base': 5000, 'min': 5000},
+}
+
+LEGACY_PRICE_KEYS = {
+    'self': 'samostoyatelnye',
+    'course_theory': 'kursovaya_teoreticheskaya',
+    'course_empirical': 'kursovaya_s_empirikov',
+    'vkr': 'diplomnaya',
+    'master': 'magisterskaya',
+}
+
+
+def normalize_prices(raw_prices):
+    normalized = {key: value.copy() for key, value in DEFAULT_PRICES.items()}
+    if not isinstance(raw_prices, dict):
+        return normalized
+
+    for raw_key, raw_value in raw_prices.items():
+        target_key = LEGACY_PRICE_KEYS.get(raw_key, raw_key)
+        if not isinstance(raw_value, dict):
+            continue
+        base = float(raw_value.get('base', 0) or 0)
+        minimum = float(raw_value.get('min', 0) or 0)
+        default_entry = DEFAULT_PRICES.get(target_key, {'base': 0, 'min': 0})
+        default_base = default_entry.get('base', 0)
+        default_min = default_entry.get('min', default_base)
+        if base <= 0:
+            base = default_base
+        base = max(base, default_base)
+        if minimum <= 0:
+            minimum = max(base, default_min)
+        minimum = max(minimum, base, default_min)
+        normalized[target_key] = {
+            'base': int(base),
+            'min': int(minimum),
+        }
+    return normalized
+
+
+PRICES = normalize_prices(load_json(PRICES_FILE, {}))
 REFERALS = load_json(REFERRALS_FILE)
 ORDERS = load_json(ORDERS_FILE)
 FEEDBACKS = load_json(FEEDBACKS_FILE)
@@ -80,9 +118,9 @@ ORDER_TYPES = {
     'samostoyatelnye': {
         'name': 'Самостоятельные, контрольные, эссе',
         'icon': '📝',
-        'description': 'Быстрые задания: эссе, контрольные, рефераты. Идеально для студентов! Уже 5000+ выполнено 🔥',
-        'details': 'Любой объем: от 1 страницы и более 20 тоже сделаем. Стоимость зависит от сроков, сложности и объема — подбираем оптимально.',
-        'examples': ['Эссе по литературе', 'Контрольная по математике', 'Реферат по истории']
+        'description': 'Быстрые задания для студентов: эссе, контрольные, рефераты. Уже 5000+ работ выполнено идеально 🔥',
+        'details': 'Любой объем — от 1 страницы до расширенных самостоятельных свыше 20 страниц. Специализируемся на психологии, социальной работе, конфликтологии и смежных дисциплинах. Стоимость рассчитываем по срокам, сложности и объему так, чтобы было выгодно и надежно.',
+        'examples': ['Эссе по психологии личности', 'Контрольная по конфликтологии', 'Реферат по социальной работе']
     },
     'kursovaya_teoreticheskaya': {
         'name': 'Курсовая теоретическая',
@@ -132,14 +170,62 @@ UPSELL_PRICES = {
 }
 
 DEADLINE_PRESETS = [
-    {'key': '24h', 'label': '⏱ 24 часа или меньше', 'days': 1, 'multiplier': 1.8, 'badge': 'Максимальная наценка за срочность'},
-    {'key': '3d', 'label': '🚀 3 дня', 'days': 3, 'multiplier': 1.45, 'badge': 'Ускоренный срок'},
-    {'key': '5d', 'label': '⚡️ 5 дней', 'days': 5, 'multiplier': 1.3, 'badge': 'Помогаем успеть вовремя'},
-    {'key': '7d', 'label': '📅 Неделя', 'days': 7, 'multiplier': 1.15, 'badge': 'Оптимальный баланс'},
-    {'key': '14d', 'label': '✅ 2 недели', 'days': 14, 'multiplier': 1.0, 'badge': 'Базовый тариф'},
-    {'key': '21d', 'label': '🌿 3 недели', 'days': 21, 'multiplier': 0.95, 'badge': 'Спокойный темп'},
-    {'key': '30d', 'label': '🧘 Месяц', 'days': 30, 'multiplier': 0.9, 'badge': 'Работаем без спешки'},
-    {'key': '45d', 'label': '🛡 Больше месяца', 'days': 45, 'multiplier': 0.85, 'badge': 'Лучшие условия и бонусы'},
+    {
+        'key': '24h',
+        'label': '⏱ 24 часа или меньше',
+        'days': 1,
+        'multiplier': 1.8,
+        'badge': 'Экстренно: приоритетная команда и бонус за смелость заказа',
+    },
+    {
+        'key': '3d',
+        'label': '🚀 3 дня',
+        'days': 3,
+        'multiplier': 1.45,
+        'badge': 'Ускоренный срок с бонусом на следующий заказ',
+    },
+    {
+        'key': '5d',
+        'label': '⚡️ 5 дней',
+        'days': 5,
+        'multiplier': 1.3,
+        'badge': 'Срочно, но комфортно: прогресс-отчёты и бонус за планирование',
+    },
+    {
+        'key': '7d',
+        'label': '📅 Неделя',
+        'days': 7,
+        'multiplier': 1.15,
+        'badge': 'Оптимальный баланс с поддержкой и накопительным бонусом',
+    },
+    {
+        'key': '14d',
+        'label': '✅ 2 недели',
+        'days': 14,
+        'multiplier': 1.0,
+        'badge': 'Базовый тариф и фиксированный бонус постоянного клиента',
+    },
+    {
+        'key': '21d',
+        'label': '🌿 3 недели',
+        'days': 21,
+        'multiplier': 0.95,
+        'badge': 'Спокойный темп: бесплатная консультация и бонус лояльности',
+    },
+    {
+        'key': '30d',
+        'label': '🧘 Месяц',
+        'days': 30,
+        'multiplier': 0.9,
+        'badge': 'Без спешки: расширенная гарантия и бонус за доверие',
+    },
+    {
+        'key': '45d',
+        'label': '🛡 Больше месяца',
+        'days': 45,
+        'multiplier': 0.85,
+        'badge': 'Максимальная выгода: лучшие условия и дополнительный бонус',
+    },
 ]
 
 DEADLINE_LOOKUP = {item['key']: item for item in DEADLINE_PRESETS}
@@ -217,6 +303,27 @@ def build_deadline_keyboard(callback_prefix: str, include_back: bool = False, ba
     if include_back and back_callback:
         rows.append([InlineKeyboardButton('⬅️ Назад', callback_data=back_callback)])
     return InlineKeyboardMarkup(rows)
+
+
+REQUIREMENTS_PROMPT_TEXT = (
+    "📚 *Расскажите про дополнительные требования.*\n"
+    "• Что указано в методичке или задании преподавателя.\n"
+    "• Объём, формат оформления, список литературы, примеры желаемого уровня.\n"
+    "Можно написать текстом сейчас или приложить материалы чуть позже на шаге с файлами.\n\n"
+    "Если дополнительных указаний нет, нажмите «Пропустить» или отправьте /skip."
+)
+
+REQUIREMENTS_EXAMPLE_TEXT = (
+    "Пример: «Методичка №3, тема 2, объём 8 страниц, Times New Roman 14, интервал 1,5; нужно 3 источника из списка преподавателя.»"
+)
+
+
+def build_requirements_keyboard():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('💡 Подсказать, что написать', callback_data='requirements_hint')],
+        [InlineKeyboardButton('⏭ Пропустить', callback_data='requirements_skip')],
+    ])
+
 
 def get_user_link(user):
     if user.username:
@@ -347,7 +454,19 @@ async def view_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data.startswith('order_'):
         key = data[6:]
         context.user_data['current_order_type'] = key
-        await query.edit_message_text("Введите тему:")
+        prompt_lines = [
+            "✍️ *Введите тему задания.*",
+            "Опишите дисциплину, формат и основные акценты, чтобы мы сразу передали задачу профильному эксперту.",
+            "Если точной темы ещё нет — так и напишите, и мы поможем сформулировать лучший вариант.",
+        ]
+        if key == 'samostoyatelnye':
+            prompt_lines.append(
+                "Например: «Эссе по конфликтологии о стратегиях медиации» или «Реферат по социальной работе о профилактике выгорания»."
+            )
+        await query.edit_message_text(
+            "\n\n".join(prompt_lines),
+            parse_mode=ParseMode.MARKDOWN,
+        )
         return INPUT_TOPIC
     elif data == 'select_order_type':
         return await select_order_type(update, context)
@@ -376,11 +495,13 @@ async def view_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # Ввод темы
 async def input_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['topic'] = update.message.text
+    topic_text = (update.message.text or '').strip()
+    context.user_data['topic'] = topic_text
     user = update.effective_user
     log_user_action(user.id, user.username, f"Тема: {update.message.text}")
     descriptions = [
-        "Выберите срок сдачи — чем спокойнее, тем выгоднее (и бонусы за ранний заказ!):",
+        "⏰ *Выберите срок сдачи — чем спокойнее, тем выгоднее.*",
+        "_Мы закрепляем бонусы за ранний заказ — выбирайте комфортный вариант:_",
         "",
     ]
     for preset in DEADLINE_PRESETS:
@@ -392,7 +513,12 @@ async def input_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
         include_back=True,
         back_callback=f'type_{back_target}' if back_target else 'select_order_type'
     )
-    await update.message.reply_text(text, reply_markup=reply_markup)
+    await update.message.reply_text(
+        text,
+        reply_markup=reply_markup,
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True,
+    )
     return SELECT_DEADLINE
 
 # Выбор срока
@@ -406,7 +532,12 @@ async def select_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['deadline_key'] = key
         context.user_data['deadline_days'] = preset['days']
         context.user_data['deadline_label'] = preset['label']
-        await query.edit_message_text("Введите дополнительные требования (или /skip):")
+        await query.edit_message_text(
+            REQUIREMENTS_PROMPT_TEXT,
+            reply_markup=build_requirements_keyboard(),
+            parse_mode=ParseMode.MARKDOWN,
+            disable_web_page_preview=True,
+        )
         return INPUT_REQUIREMENTS
     elif data.startswith('type_'):
         return await view_order_details(update, context)
@@ -414,19 +545,44 @@ async def select_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Ввод требований
 async def input_requirements(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['requirements'] = update.message.text
+    requirements_text = (update.message.text or '').strip()
+    context.user_data['requirements'] = requirements_text or 'Нет'
     return await ask_contact(update, context)
 
 async def skip_requirements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['requirements'] = 'Нет'
     return await ask_contact(update, context)
 
+
+async def requirements_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await answer_callback_query(query, context)
+    data = query.data
+    if data == 'requirements_hint':
+        await query.message.reply_text(REQUIREMENTS_EXAMPLE_TEXT)
+        return INPUT_REQUIREMENTS
+    if data == 'requirements_skip':
+        context.user_data['requirements'] = 'Нет'
+        await query.edit_message_text('✅ Дополнительные требования можно будет уточнить позже.')
+        return await ask_contact(update, context)
+    return INPUT_REQUIREMENTS
+
 async def ask_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = (
-        "Оставьте контакт, куда менеджеру написать (Telegram, VK или почта)."
-        " Без этого мы не сможем принять заказ. Пример: https://t.me/username"
+        "📬 *Оставьте контакт, куда менеджеру написать.*\n"
+        "Пришлите активную ссылку на Telegram, VK или рабочую почту — так менеджер быстро свяжется с вами.\n"
+        "Пример: https://t.me/username, @username, https://vk.com/id123 или name@example.com.\n"
+        "_Без контакта мы не сможем принять заказ._"
     )
-    await update.message.reply_text(text)
+    if update.message:
+        target = update.message
+    else:
+        target = update.callback_query.message
+    await target.reply_text(
+        text,
+        parse_mode=ParseMode.MARKDOWN,
+        disable_web_page_preview=True,
+    )
     return INPUT_CONTACT
 
 async def input_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -434,8 +590,9 @@ async def input_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     link = build_contact_link(contact_text)
     if not link:
         await update.message.reply_text(
-            "Пожалуйста, укажите кликабельный контакт (ссылка на Telegram/VK или e-mail)."
-            " Например: https://t.me/username или name@example.com"
+            "Пожалуйста, пришлите рабочую ссылку или e-mail, чтобы мы смогли написать вам.\n"
+            "Примеры: https://t.me/username, @username, https://vk.com/id123, name@example.com",
+            disable_web_page_preview=True,
         )
         return INPUT_CONTACT
     context.user_data['contact'] = contact_text
@@ -673,7 +830,7 @@ async def confirm_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not cart:
         await query.edit_message_text("Корзина пуста.")
         return await main_menu(update, context)
-    text_lines = ["<b>Ваша корзина (подтвердите для специального бонуса!):</b>"]
+    text_lines = ["<b>Ваша корзина. Подтвердите — зафиксируем персональный бонус:</b>"]
     total = 0
     for i, order in enumerate(cart, 1):
         order_name = ORDER_TYPES.get(order['type'], {}).get('name', 'Неизвестно')
@@ -702,8 +859,8 @@ async def confirm_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
         discount = round_price(total * 0.1)
         total -= discount
         text_lines.append(f"Скидка за несколько заказов: -{discount} ₽")
-    text_lines.append(f"<b>Итого: {total} ₽</b>")
-    text_lines.append("Подтвердить?")
+    text_lines.append(f"<b>Итого: {total} ₽</b> — сумма с учётом допов и скидок.")
+    text_lines.append("Подтвердить оформление?")
     text = "\n".join(text_lines)
     keyboard = [
         [InlineKeyboardButton("Подтвердить", callback_data='place_order')],
@@ -727,14 +884,18 @@ async def confirm_cart_handler(update: Update, context: ContextTypes.DEFAULT_TYP
             order_id += 1
         save_json(ORDERS_FILE, ORDERS)
         text = (
-            "Заказ оформлен! Менеджер свяжется с вами."
-            " [Администратор](https://t.me/Thisissaymoon) уже получил детали."
+            "✅ Заказ оформлен! Наш менеджер скоро свяжется с вами.\n"
+            "[Администратор](https://t.me/Thisissaymoon) уже получил все детали и файлы."
         )
         await query.edit_message_text(text, parse_mode=ParseMode.MARKDOWN)
         if ADMIN_CHAT_ID:
             await notify_admin_about_order(update, context, context.user_data['cart'])
         context.user_data.pop('cart', None)
-        return await main_menu(update, context, "Спасибо! Хотите заказать еще?")
+        return await main_menu(
+            update,
+            context,
+            "Спасибо! Хотите заказать ещё? Наш менеджер уже на связи — [администратор](https://t.me/Thisissaymoon).",
+        )
     elif data == 'cancel_cart':
         context.user_data.pop('cart', None)
         return await main_menu(update, context, "Корзина отменена. Посмотрите еще?")
@@ -1230,7 +1391,11 @@ def main():
             VIEW_ORDER_DETAILS: [CallbackQueryHandler(view_order_details)],
             INPUT_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_topic)],
             SELECT_DEADLINE: [CallbackQueryHandler(select_deadline)],
-            INPUT_REQUIREMENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_requirements), CommandHandler('skip', skip_requirements)],
+            INPUT_REQUIREMENTS: [
+                CallbackQueryHandler(requirements_button_handler, pattern='^requirements_(hint|skip)$'),
+                MessageHandler(filters.TEXT & ~filters.COMMAND, input_requirements),
+                CommandHandler('skip', skip_requirements),
+            ],
             INPUT_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_contact)],
             UPLOAD_FILES: [
                 CallbackQueryHandler(file_upload_action, pattern='^files_(done|skip)$'),
