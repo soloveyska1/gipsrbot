@@ -184,6 +184,19 @@ def log_user_action(user_id, username, action):
     save_json(USER_LOGS_FILE, USER_LOGS)
     logger.info(f"Пользователь {user_id} ({username}): {action}")
 
+async def answer_callback(query):
+    """Безопасно отвечает на callback-запрос, чтобы избежать ошибок повторного ответа."""
+    if not query:
+        return
+    try:
+        await query.answer()
+    except TelegramError as exc:
+        error_text = str(exc).lower()
+        if "query is too old" in error_text or "query id is invalid" in error_text:
+            logger.debug("Callback уже обработан: %s", exc)
+        else:
+            raise
+
 # Расчет цены
 def calculate_price(order_type_key, days_left, complexity_factor=1.0):
     if order_type_key not in PRICES:
@@ -244,7 +257,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message=
     reply_markup = InlineKeyboardMarkup(keyboard)
     if update.callback_query:
         query = update.callback_query
-        await query.answer()
+        await answer_callback(query)
         try:
             await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
         except TelegramError as e:
@@ -259,7 +272,7 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message=
 # Обработчик главного меню
 async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     user = update.effective_user
     log_user_action(user.id, user.username, f"Выбор в меню: {data}")
@@ -280,7 +293,7 @@ async def main_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Выбор типа заказа
 async def select_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data if query else None
     user = update.effective_user
     log_user_action(user.id, user.username, "Выбор типа заказа")
@@ -302,7 +315,7 @@ async def select_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Подробности о типе заказа
 async def view_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('order_'):
         key = data[6:]
@@ -347,7 +360,7 @@ async def input_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Выбор срока
 async def select_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('deadline_'):
         days = int(data[9:])
@@ -378,7 +391,7 @@ async def prompt_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE)
         await update.message.reply_text(text)
     elif update.callback_query:
         query = update.callback_query
-        await query.answer()
+        await answer_callback(query)
         await query.edit_message_text(text)
     return UPLOAD_FILES
 
@@ -438,7 +451,7 @@ async def request_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(prompt)
     elif update.callback_query:
         query = update.callback_query
-        await query.answer()
+        await answer_callback(query)
         await query.edit_message_text(prompt)
     return INPUT_CONTACT
 
@@ -463,14 +476,14 @@ async def add_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         query = update.callback_query
-        await query.answer()
+        await answer_callback(query)
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return ADD_UPSSELL
 
 # Обработчик допуслуг
 async def upsell_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     upsells = context.user_data.setdefault('upsells', set())  
     added = False
@@ -547,7 +560,7 @@ async def add_another_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def add_another_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data == 'add_another_yes':
         return await select_order_type(update, context)
@@ -589,7 +602,7 @@ async def confirm_cart(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def confirm_cart_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data == 'place_order':
         user = update.effective_user
@@ -681,7 +694,7 @@ async def confirm_cart_handler(update: Update, context: ContextTypes.DEFAULT_TYP
 # Показ прайс-листа
 async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('price_detail_'):
         key = data[13:]
@@ -717,7 +730,7 @@ async def show_price_list(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Калькулятор цен
 async def price_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('calc_type_'):
         key = data[10:]
@@ -743,7 +756,7 @@ async def price_calculator(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def calc_select_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('calc_dead_'):
         days = int(data[10:])
@@ -760,7 +773,7 @@ async def calc_select_deadline(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def calc_select_complexity(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('calc_comp_'):
         comp = float(data[10:])
@@ -780,7 +793,7 @@ async def calc_select_complexity(update: Update, context: ContextTypes.DEFAULT_T
 # Показ профиля
 async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     user = update.effective_user
     user_id = str(user.id)
@@ -808,7 +821,7 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Показ заказов
 async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data == 'profile':
         return await show_profile(update, context)
@@ -837,7 +850,7 @@ async def input_feedback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Показ FAQ
 async def show_faq(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data.startswith('faq_'):
         idx = int(data[4:])
@@ -869,7 +882,7 @@ async def show_admin_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
     text = "🔐 Админ-панель"
     if update.callback_query:
         query = update.callback_query
-        await query.answer()
+        await answer_callback(query)
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     else:
         await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -887,7 +900,7 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Обработчик админ-меню
 async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
-    await query.answer()
+    await answer_callback(query)
     data = query.data
     if data == 'admin_menu':
         return await show_admin_menu(update, context)
