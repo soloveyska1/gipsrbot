@@ -247,7 +247,7 @@ class OrderRecord:
     deadline_date: str
     page_plan: str
     requirements: str
-    attachments: List[Dict[str, str]] = field(default_factory=list)
+    attachments: List[Dict[str, str]]
     upsells: List[str]
     status_key: str
     base_price: int
