@@ -20,6 +20,7 @@ write_files:
       [Service]
       Type=oneshot
       WorkingDirectory=/root/gipsr_bot
+      Environment=GIPSRBOT_APP_DIR=/root/gipsr_bot
       ExecStart=/bin/bash /root/gipsr_bot/scripts/autodeploy.sh
       StandardOutput=journal
       StandardError=journal
@@ -35,11 +36,32 @@ write_files:
 
       [Path]
       PathExists=/root/gipsr_bot/scripts/autodeploy.sh
+      PathExists=/root/gipsr_bot/.env
       PathChanged=/root/gipsr_bot/.env
+      PathModified=/root/gipsr_bot/.env
       PathChanged=/root/gipsr_bot/bot.py
+      PathModified=/root/gipsr_bot/bot.py
       PathChanged=/root/gipsr_bot/requirements.txt
+      PathModified=/root/gipsr_bot/requirements.txt
       PathChanged=/root/gipsr_bot/scripts/autodeploy.sh
+      PathModified=/root/gipsr_bot/scripts/autodeploy.sh
       PathChanged=/root/gipsr_bot/scripts/gipsrbot-bot.service
+      PathModified=/root/gipsr_bot/scripts/gipsrbot-bot.service
+      PathExists=/root/gipsr_bot/data
+      PathChanged=/root/gipsr_bot/data/prices.json
+      PathModified=/root/gipsr_bot/data/prices.json
+      PathChanged=/root/gipsr_bot/data/orders.json
+      PathModified=/root/gipsr_bot/data/orders.json
+      PathChanged=/root/gipsr_bot/data/user_logs.json
+      PathModified=/root/gipsr_bot/data/user_logs.json
+      PathChanged=/root/gipsr_bot/data/users.json
+      PathModified=/root/gipsr_bot/data/users.json
+      PathChanged=/root/gipsr_bot/data/referrals.json
+      PathModified=/root/gipsr_bot/data/referrals.json
+      PathChanged=/root/gipsr_bot/data/feedbacks.json
+      PathModified=/root/gipsr_bot/data/feedbacks.json
+      PathChanged=/root/gipsr_bot/data/bonuses.json
+      PathModified=/root/gipsr_bot/data/bonuses.json
       Unit=gipsrbot-autodeploy.service
 
       [Install]
