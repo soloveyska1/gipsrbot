@@ -3,6 +3,7 @@ import logging
 import json
 import html
 import re
+import csv
 from typing import Optional
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -13,7 +14,6 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from dotenv import load_dotenv
-import pandas as pd
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -192,6 +192,31 @@ UPSELL_PRICES = {
     'prez': 2000,
     'speech': 1000,
 }
+
+EXPORT_FIELD_ORDER = [
+    'user_id',
+    'order_id',
+    'type',
+    'topic',
+    'status',
+    'status_code',
+    'created_at',
+    'updated_at',
+    'deadline_key',
+    'deadline_label',
+    'deadline_days',
+    'price',
+    'bonus_used',
+    'referrer_id',
+    'referral_rewarded',
+    'loyalty_rewarded',
+    'upsells',
+    'contact',
+    'contact_link',
+    'requirements',
+    'files',
+    'status_history',
+]
 
 FEEDBACK_BONUS_AMOUNT = 200
 
@@ -3013,23 +3038,74 @@ async def admin_prompt_price_input(
     return ADMIN_MENU
 
 
+def _serialize_export_value(value):
+    if value is None:
+        return ''
+    if isinstance(value, bool):
+        return '1' if value else '0'
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, (list, dict)):
+        try:
+            return json.dumps(value, ensure_ascii=False)
+        except (TypeError, ValueError):
+            return str(value)
+    return str(value)
+
+
 async def admin_export_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
     await answer_callback_query(query, context)
-    df = pd.DataFrame([
-        {'user_id': uid, **ord}
-        for uid, ords in ORDERS.items()
-        if isinstance(ords, list)
-        for ord in ords
-        if isinstance(ord, dict)
-    ])
+
+    export_rows = []
+    encountered_fields = []
+
+    def register_field(field_name: str):
+        if field_name not in encountered_fields:
+            encountered_fields.append(field_name)
+
+    for orders in ORDERS.values():
+        if not isinstance(orders, list):
+            continue
+        for order in orders:
+            if not isinstance(order, dict):
+                continue
+            row = {}
+            for key, value in order.items():
+                register_field(key)
+                row[key] = _serialize_export_value(value)
+            export_rows.append(row)
+
+    if not export_rows:
+        await query.edit_message_text(
+            "📂 Пока нет заказов для экспорта.",
+            reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data='admin_menu')]]),
+        )
+        return ADMIN_MENU
+
+    preferred = [field for field in EXPORT_FIELD_ORDER if field in encountered_fields]
+    remaining = [field for field in encountered_fields if field not in preferred]
+    fieldnames = preferred + remaining
+
     export_file = os.path.join(DATA_DIR, 'orders_export.csv')
-    df.to_csv(export_file, index=False)
-    await context.bot.send_document(ADMIN_CHAT_ID, open(export_file, 'rb'))
-    os.remove(export_file)
+    with open(export_file, 'w', newline='', encoding='utf-8') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
+        writer.writeheader()
+        for row in export_rows:
+            writer.writerow({field: row.get(field, '') for field in fieldnames})
+
+    try:
+        with open(export_file, 'rb') as export_handle:
+            await context.bot.send_document(ADMIN_CHAT_ID, export_handle)
+    finally:
+        try:
+            os.remove(export_file)
+        except OSError:
+            logger.warning("Не удалось удалить временный файл экспорта %s", export_file)
+
     await query.edit_message_text(
         "📤 Экспорт отправлен в чат.",
-        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data='admin_menu')]])
+        reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("⬅️ Меню", callback_data='admin_menu')]]),
     )
     return ADMIN_MENU
 

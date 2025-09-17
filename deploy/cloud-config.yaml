@@ -47,3 +47,4 @@ runcmd:
   - [mkdir, -p, /root/gipsr_bot]
   - [systemctl, daemon-reload]
   - [systemctl, enable, '--now', 'gipsrbot-autodeploy.path']
+  - [systemctl, start, 'gipsrbot-autodeploy.service']
