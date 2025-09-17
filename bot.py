@@ -1115,7 +1115,10 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
-    log_user_action(user.id, user.username, "/start", user.full_name)
+    if user:
+        log_user_action(user.id, user.username, "/start", user.full_name)
+    else:
+        logger.warning("Получена команда /start без данных пользователя: %s", update)
     text = message.text if message and message.text else ""
     args = text.split() if text else []
 
@@ -1128,12 +1131,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             bot_username = None
 
     ref_link = None
-    if bot_username:
+    if bot_username and user:
         ref_link = f"https://t.me/{bot_username}?start={user.id}"
         context.user_data['ref_link'] = ref_link
     else:
         context.user_data.pop('ref_link', None)
-    if len(args) > 1 and args[1].lstrip('-').isdigit():
+    if user and len(args) > 1 and args[1].lstrip('-').isdigit():
         referrer_id = int(args[1])
         if referrer_id != user.id:
             register_referral(referrer_id, user)
@@ -1142,7 +1145,8 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(referrer_id, f"🎉 Новый реферал: {user.first_name}")
             except TelegramError as exc:
                 logger.warning(f"Не удалось уведомить реферера {referrer_id}: {exc}")
-    safe_name = escape_markdown(user.first_name or user.full_name or 'друг', version=1)
+    display_name = (user.first_name or user.full_name) if user else None
+    safe_name = escape_markdown(display_name or 'друг', version=1)
     welcome = (
         f"👋 Добро пожаловать, {safe_name}! Работаем со всеми дисциплинами, кроме технических (чертежи)."
         " Уже 5000+ клиентов и 10% скидка на первый заказ 🔥"
@@ -1155,7 +1159,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Главное меню
 async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message=None):
     user = update.effective_user
-    log_user_action(user.id, user.username, "Главное меню", user.full_name)
+    if user:
+        log_user_action(user.id, user.username, "Главное меню", user.full_name)
+    else:
+        logger.warning("Попытка открыть главное меню без данных пользователя: %s", update)
     text = message or "Выберите раздел:"
     keyboard = [
         [InlineKeyboardButton("📝 Сделать заказ", callback_data='make_order')],
@@ -1177,12 +1184,28 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message=
                 await query.edit_message_text(text, reply_markup=reply_markup)
     else:
         target_message = update.effective_message
+        chat = update.effective_chat
+        chat_id = chat.id if chat else (user.id if user else None)
         if target_message:
             try:
                 await target_message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
             except TelegramError as e:
                 logger.warning("Не удалось отправить главное меню с Markdown: %s", e)
-                await target_message.reply_text(text, reply_markup=reply_markup)
+                try:
+                    await target_message.reply_text(text, reply_markup=reply_markup)
+                except TelegramError as inner_exc:
+                    logger.error("Не удалось отправить главное меню ответом: %s", inner_exc)
+        elif chat_id is not None:
+            try:
+                await context.bot.send_message(chat_id, text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+            except TelegramError as e:
+                logger.warning("Не удалось отправить главное меню через send_message с Markdown: %s", e)
+                try:
+                    await context.bot.send_message(chat_id, text, reply_markup=reply_markup)
+                except TelegramError as inner_exc:
+                    logger.error("Не удалось доставить главное меню в чат %s: %s", chat_id, inner_exc)
+        else:
+            logger.error("Не удалось определить чат для отправки главного меню: %s", update)
     return SELECT_MAIN_MENU
 
 # Обработчик главного меню
