@@ -12,6 +12,7 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
+from telegram.helpers import escape_markdown
 from dotenv import load_dotenv
 import pandas as pd
 
@@ -575,7 +576,8 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     log_user_action(user.id, user.username, "/start")
-    args = update.message.text.split()
+    message_text = update.message.text if update.message and update.message.text else ""
+    args = message_text.split()
     bot_username = (await context.bot.get_me()).username
     ref_link = f"https://t.me/{bot_username}?start={user.id}"
     context.user_data['ref_link'] = ref_link
@@ -585,9 +587,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
             REFERALS.setdefault(str(referrer_id), []).append(user.id)
             save_json(REFERRALS_FILE, REFERALS)
             await context.bot.send_message(referrer_id, f"🎉 Новый реферал: {user.first_name}")
+    display_name = user.first_name or user.full_name or "друг"
+    safe_name = escape_markdown(display_name, version=1)
+    safe_ref_link = escape_markdown(ref_link, version=1)
     welcome = (
-        f"👋 Добро пожаловать, {user.first_name}! Работаем со всеми дисциплинами, кроме технических (чертежи)."
-        f" Уже 5000+ клиентов и 10% скидка на первый заказ 🔥\nПоделитесь ссылкой для бонусов: {ref_link}"
+        f"👋 Добро пожаловать, {safe_name}! Работаем со всеми дисциплинами, кроме технических (чертежи)."
+        f" Уже 5000+ клиентов и 10% скидка на первый заказ 🔥\nПоделитесь ссылкой для бонусов: {safe_ref_link}"
     )
     return await main_menu(update, context, welcome)
 
