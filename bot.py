@@ -648,9 +648,29 @@ def log_user_action(user_id, username, action, full_name=None):
         log_entry['username'] = username
     if full_name:
         log_entry['full_name'] = full_name
-    USER_LOGS.setdefault(str(user_id), []).append(log_entry)
+    user_key = str(user_id)
+    entries = USER_LOGS.get(user_key)
+    if entries is None:
+        entries = []
+    elif not isinstance(entries, list):
+        logger.warning(
+            "Неверный формат истории действий для пользователя %s. Преобразую в список.",
+            user_key,
+        )
+        entries = [entries]
+    USER_LOGS[user_key] = entries
+    entries.append(log_entry)
     save_json(USER_LOGS_FILE, USER_LOGS)
-    profile = USERS.setdefault(str(user_id), {})
+    profile = USERS.get(user_key)
+    if profile is None:
+        profile = {}
+    elif not isinstance(profile, dict):
+        logger.warning(
+            "Неверный формат профиля пользователя %s. Преобразую в словарь.",
+            user_key,
+        )
+        profile = {'legacy': profile}
+    USERS[user_key] = profile
     profile.setdefault('first_seen', timestamp)
     profile['last_seen'] = timestamp
     profile['last_action'] = action
