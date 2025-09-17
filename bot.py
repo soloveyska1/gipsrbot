@@ -4,6 +4,7 @@ import json
 import html
 import re
 import csv
+from pathlib import Path
 from typing import Optional
 from datetime import datetime, timedelta
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -23,11 +24,12 @@ ADMIN_CHAT_ID_RAW = (os.getenv('ADMIN_CHAT_ID', '') or '').strip()
 ADMIN_CHAT_ID = 0  # будет проинициализирован после настройки логирования
 
 # Директории
-BASE_DIR = os.path.join(os.getcwd(), 'clients')
-DATA_DIR = os.path.join(os.getcwd(), 'data')
-LOGS_DIR = os.path.join(os.getcwd(), 'logs')
-for directory in [BASE_DIR, DATA_DIR, LOGS_DIR]:
-    os.makedirs(directory, exist_ok=True)
+PROJECT_ROOT = Path(__file__).resolve().parent
+BASE_DIR = PROJECT_ROOT / 'clients'
+DATA_DIR = PROJECT_ROOT / 'data'
+LOGS_DIR = PROJECT_ROOT / 'logs'
+for directory in (BASE_DIR, DATA_DIR, LOGS_DIR):
+    directory.mkdir(parents=True, exist_ok=True)
 
 # Настройка логирования
 logging.basicConfig(
@@ -35,7 +37,7 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
-file_handler = logging.FileHandler(os.path.join(LOGS_DIR, 'bot.log'))
+file_handler = logging.FileHandler(LOGS_DIR / 'bot.log', encoding='utf-8')
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
 
@@ -46,13 +48,13 @@ except (TypeError, ValueError):
     logger.warning("Некорректное значение ADMIN_CHAT_ID='%s'. Уведомления администратору отключены.", ADMIN_CHAT_ID_RAW)
 
 # Файлы данных
-PRICES_FILE = os.path.join(DATA_DIR, 'prices.json')
-REFERRALS_FILE = os.path.join(DATA_DIR, 'referrals.json')
-ORDERS_FILE = os.path.join(DATA_DIR, 'orders.json')
-FEEDBACKS_FILE = os.path.join(DATA_DIR, 'feedbacks.json')
-BONUSES_FILE = os.path.join(DATA_DIR, 'bonuses.json')
-USER_LOGS_FILE = os.path.join(DATA_DIR, 'user_logs.json')
-USERS_FILE = os.path.join(DATA_DIR, 'users.json')
+PRICES_FILE = DATA_DIR / 'prices.json'
+REFERRALS_FILE = DATA_DIR / 'referrals.json'
+ORDERS_FILE = DATA_DIR / 'orders.json'
+FEEDBACKS_FILE = DATA_DIR / 'feedbacks.json'
+BONUSES_FILE = DATA_DIR / 'bonuses.json'
+USER_LOGS_FILE = DATA_DIR / 'user_logs.json'
+USERS_FILE = DATA_DIR / 'users.json'
 
 # Функции загрузки/сохранения с обработкой ошибок
 def load_json(file_path, default=None):
@@ -98,6 +100,32 @@ LEGACY_PRICE_KEYS = {
     'vkr': 'diplomnaya',
     'master': 'magisterskaya',
 }
+
+START_PAYLOAD_PATTERN = re.compile(r'^(?:ref=)?(-?\d+)$')
+
+
+def extract_start_payload(raw_args, message_text: Optional[str]) -> str:
+    if raw_args:
+        first = raw_args[0]
+        if first is not None:
+            return str(first).strip()
+    if message_text:
+        parts = message_text.split(maxsplit=1)
+        if len(parts) > 1:
+            return parts[1].strip()
+    return ''
+
+
+def parse_referrer_id(payload: str) -> Optional[int]:
+    if not payload:
+        return None
+    match = START_PAYLOAD_PATTERN.match(payload)
+    if not match:
+        return None
+    try:
+        return int(match.group(1))
+    except (TypeError, ValueError):
+        return None
 
 
 def normalize_prices(raw_prices):
@@ -1135,12 +1163,17 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
     message = update.effective_message
+    message_text = message.text if message and message.text else ""
+
+    if context.user_data:
+        context.user_data.clear()
+
+    payload = extract_start_payload(list(getattr(context, 'args', [])), message_text)
+
     if user:
         log_user_action(user.id, user.username, "/start", user.full_name)
     else:
         logger.warning("Получена команда /start без данных пользователя: %s", update)
-    text = message.text if message and message.text else ""
-    args = text.split() if text else []
 
     bot_username = context.bot.username
     if not bot_username:
@@ -1156,15 +1189,21 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data['ref_link'] = ref_link
     else:
         context.user_data.pop('ref_link', None)
-    if user and len(args) > 1 and args[1].lstrip('-').isdigit():
-        referrer_id = int(args[1])
-        if referrer_id != user.id:
-            register_referral(referrer_id, user)
-            context.user_data['referrer_id'] = referrer_id
-            try:
-                await context.bot.send_message(referrer_id, f"🎉 Новый реферал: {user.first_name}")
-            except TelegramError as exc:
-                logger.warning(f"Не удалось уведомить реферера {referrer_id}: {exc}")
+    referrer_id = parse_referrer_id(payload)
+    if user and referrer_id is not None and referrer_id != user.id:
+        register_referral(referrer_id, user)
+        context.user_data['referrer_id'] = referrer_id
+        try:
+            await context.bot.send_message(referrer_id, f"🎉 Новый реферал: {user.first_name}")
+        except TelegramError as exc:
+            logger.warning(f"Не удалось уведомить реферера {referrer_id}: {exc}")
+    else:
+        context.user_data.pop('referrer_id', None)
+        if payload:
+            if referrer_id is not None and user and referrer_id == user.id:
+                logger.debug("Игнорирую параметр /start '%s': самореферал", payload)
+            else:
+                logger.debug("Игнорирую параметр /start '%s'", payload)
     display_name = (user.first_name or user.full_name) if user else None
     safe_name = escape_markdown(display_name or 'друг', version=1)
     welcome = (
@@ -3163,19 +3202,19 @@ async def admin_export_orders(update: Update, context: ContextTypes.DEFAULT_TYPE
     remaining = [field for field in encountered_fields if field not in preferred]
     fieldnames = preferred + remaining
 
-    export_file = os.path.join(DATA_DIR, 'orders_export.csv')
-    with open(export_file, 'w', newline='', encoding='utf-8') as csvfile:
+    export_file = DATA_DIR / 'orders_export.csv'
+    with export_file.open('w', newline='', encoding='utf-8') as csvfile:
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames, extrasaction='ignore')
         writer.writeheader()
         for row in export_rows:
             writer.writerow({field: row.get(field, '') for field in fieldnames})
 
     try:
-        with open(export_file, 'rb') as export_handle:
+        with export_file.open('rb') as export_handle:
             await context.bot.send_document(ADMIN_CHAT_ID, export_handle)
     finally:
         try:
-            os.remove(export_file)
+            export_file.unlink()
         except OSError:
             logger.warning("Не удалось удалить временный файл экспорта %s", export_file)
 

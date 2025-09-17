@@ -1,7 +1,26 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-APP_DIR="/root/gipsr_bot"
+log() {
+    printf '[%s] %s\n' "$(date -Iseconds)" "$*"
+}
+
+trap 'log "Auto-deploy failed on line $LINENO"; exit 1' ERR
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+DEFAULT_APP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+ENV_APP_DIR="${APP_DIR:-}"
+APP_DIR="${GIPSRBOT_APP_DIR:-${ENV_APP_DIR:-$DEFAULT_APP_DIR}}"
+
+log "Using application directory: $APP_DIR"
+
+if [[ ! -d "$APP_DIR" ]]; then
+    log "Application directory $APP_DIR does not exist. Aborting."
+    exit 1
+fi
+
+log "Starting auto-deploy sequence"
+
 VENV_DIR="$APP_DIR/.venv"
 PYTHON_BIN="$VENV_DIR/bin/python"
 PIP_BIN="$VENV_DIR/bin/pip"
@@ -10,10 +29,17 @@ SERVICE_SRC="$APP_DIR/scripts/gipsrbot-bot.service"
 SERVICE_DEST="/etc/systemd/system/${SERVICE_UNIT}"
 ENV_FILE="$APP_DIR/.env"
 service_installed=false
+SYSTEMCTL_AVAILABLE=false
+JOURNALCTL_AVAILABLE=false
 
-log() {
-    printf '[%s] %s\n' "$(date -Iseconds)" "$*"
-}
+if command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]; then
+    SYSTEMCTL_AVAILABLE=true
+    if command -v journalctl >/dev/null 2>&1; then
+        JOURNALCTL_AVAILABLE=true
+    fi
+else
+    log "systemd is unavailable. Service management will be skipped."
+fi
 
 read_env_value() {
     local key="$1"
@@ -50,10 +76,6 @@ print(value)
 PY
 }
 
-log "Starting auto-deploy sequence"
-
-cd "$APP_DIR"
-
 log "Ensuring runtime directories exist"
 install -d -m 755 "$APP_DIR/clients" "$APP_DIR/data" "$APP_DIR/logs"
 
@@ -66,10 +88,20 @@ migrate_data_file() {
     fi
 }
 
-migrate_data_file "orders.json" "$APP_DIR/data"
-migrate_data_file "prices.json" "$APP_DIR/data"
-migrate_data_file "user_logs.json" "$APP_DIR/data"
-migrate_data_file "orders.xlsx" "$APP_DIR/data"
+declare -a DATA_FILES=(
+    "orders.json"
+    "prices.json"
+    "user_logs.json"
+    "orders.xlsx"
+    "users.json"
+    "referrals.json"
+    "feedbacks.json"
+    "bonuses.json"
+)
+
+for data_file in "${DATA_FILES[@]}"; do
+    migrate_data_file "$data_file" "$APP_DIR/data"
+done
 
 if [[ ! -d "$VENV_DIR" ]]; then
     log "Creating Python virtual environment"
@@ -80,11 +112,16 @@ log "Updating pip and project dependencies"
 "$PYTHON_BIN" -m pip install --upgrade pip wheel
 "$PIP_BIN" install --no-input --upgrade -r "$APP_DIR/requirements.txt"
 
+log "Validating bot source"
+"$PYTHON_BIN" -m compileall "$APP_DIR/bot.py"
+
 if [[ -f "$SERVICE_SRC" ]]; then
     log "Installing systemd unit $SERVICE_UNIT"
     install -m 0644 "$SERVICE_SRC" "$SERVICE_DEST"
-    systemctl daemon-reload
-    systemctl reset-failed "$SERVICE_UNIT" || true
+    if [[ "$SYSTEMCTL_AVAILABLE" == true ]]; then
+        systemctl daemon-reload
+        systemctl reset-failed "$SERVICE_UNIT" || true
+    fi
     service_installed=true
 else
     log "Warning: systemd unit definition $SERVICE_SRC not found"
@@ -101,13 +138,48 @@ if [[ -z "$bot_token" ]]; then
     exit 0
 fi
 
+restart_service() {
+    local unit="$1"
+    if [[ "$SYSTEMCTL_AVAILABLE" != true ]]; then
+        log "systemd is unavailable. Skipping restart for $unit."
+        return 0
+    fi
+
+    log "Enabling $unit"
+    if ! systemctl enable "$unit"; then
+        log "Failed to enable $unit"
+        systemctl status "$unit" --no-pager || true
+        return 1
+    fi
+
+    log "Restarting $unit"
+    if ! systemctl restart "$unit"; then
+        log "Failed to restart $unit"
+        systemctl status "$unit" --no-pager || true
+        if [[ "$JOURNALCTL_AVAILABLE" == true ]]; then
+            journalctl -u "$unit" -n 50 --no-pager || true
+        fi
+        return 1
+    fi
+
+    if systemctl --quiet is-active "$unit"; then
+        log "$unit is active"
+        return 0
+    fi
+
+    log "$unit is not running after restart"
+    systemctl status "$unit" --no-pager || true
+    if [[ "$JOURNALCTL_AVAILABLE" == true ]]; then
+        journalctl -u "$unit" -n 50 --no-pager || true
+    fi
+    return 1
+}
+
 if [[ "$service_installed" != true ]]; then
     log "Systemd unit $SERVICE_UNIT is unavailable. Deployment finished without restarting the bot."
     exit 0
 fi
 
-log "Enabling and restarting $SERVICE_UNIT"
-systemctl enable "$SERVICE_UNIT"
-systemctl restart "$SERVICE_UNIT"
+restart_service "$SERVICE_UNIT"
 
 log "Auto-deploy sequence completed"
