@@ -8,10 +8,46 @@ PIP_BIN="$VENV_DIR/bin/pip"
 SERVICE_UNIT="gipsrbot-bot.service"
 SERVICE_SRC="$APP_DIR/scripts/gipsrbot-bot.service"
 SERVICE_DEST="/etc/systemd/system/${SERVICE_UNIT}"
+ENV_FILE="$APP_DIR/.env"
 service_installed=false
 
 log() {
     printf '[%s] %s\n' "$(date -Iseconds)" "$*"
+}
+
+read_env_value() {
+    local key="$1"
+    local file="$2"
+    python3 - "$key" "$file" <<'PY'
+import sys
+from pathlib import Path
+
+key = sys.argv[1]
+path = Path(sys.argv[2])
+value = ""
+if path.exists():
+    for raw_line in path.read_text(encoding="utf-8").splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("export "):
+            line = line[len("export "):].lstrip()
+        if "=" not in line:
+            continue
+        current_key, current_value = line.split("=", 1)
+        if current_key.strip() != key:
+            continue
+        current_value = current_value.strip()
+        if (
+            current_value
+            and current_value[0] == current_value[-1]
+            and current_value[0] in "'\""
+        ):
+            current_value = current_value[1:-1]
+        value = current_value.strip()
+        break
+print(value)
+PY
 }
 
 log "Starting auto-deploy sequence"
@@ -48,13 +84,20 @@ if [[ -f "$SERVICE_SRC" ]]; then
     log "Installing systemd unit $SERVICE_UNIT"
     install -m 0644 "$SERVICE_SRC" "$SERVICE_DEST"
     systemctl daemon-reload
+    systemctl reset-failed "$SERVICE_UNIT" || true
     service_installed=true
 else
     log "Warning: systemd unit definition $SERVICE_SRC not found"
 fi
 
-if [[ ! -f "$APP_DIR/.env" ]]; then
+if [[ ! -f "$ENV_FILE" ]]; then
     log "Environment file (.env) not found. Skipping bot restart until credentials are provided."
+    exit 0
+fi
+
+bot_token="$(read_env_value TELEGRAM_BOT_TOKEN "$ENV_FILE" | tr -d '\r')"
+if [[ -z "$bot_token" ]]; then
+    log "TELEGRAM_BOT_TOKEN is missing or empty in $ENV_FILE. Skipping bot restart."
     exit 0
 fi
 

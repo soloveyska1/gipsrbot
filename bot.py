@@ -18,7 +18,7 @@ from dotenv import load_dotenv
 
 # Загрузка переменных окружения
 load_dotenv()
-TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
+TELEGRAM_BOT_TOKEN = (os.getenv('TELEGRAM_BOT_TOKEN') or '').strip()
 ADMIN_CHAT_ID_RAW = (os.getenv('ADMIN_CHAT_ID', '') or '').strip()
 ADMIN_CHAT_ID = 0  # будет проинициализирован после настройки логирования
 
@@ -3337,6 +3337,11 @@ async def admin_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 # Основная функция
 def main():
+    if not TELEGRAM_BOT_TOKEN:
+        logger.error(
+            "Не задан TELEGRAM_BOT_TOKEN. Укажите токен бота в файле .env перед запуском."
+        )
+        raise SystemExit(1)
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start), CommandHandler('admin', admin_start)],
