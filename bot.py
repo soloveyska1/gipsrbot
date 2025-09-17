@@ -4,7 +4,13 @@ import logging
 import json
 from datetime import datetime, timedelta
 from html import escape
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import (
+    Update,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
+)
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, ContextTypes,
     CallbackQueryHandler, MessageHandler, filters, ConversationHandler
@@ -42,6 +48,10 @@ REFERRALS_FILE = os.path.join(DATA_DIR, 'referrals.json')
 ORDERS_FILE = os.path.join(DATA_DIR, 'orders.json')
 FEEDBACKS_FILE = os.path.join(DATA_DIR, 'feedbacks.json')
 USER_LOGS_FILE = os.path.join(DATA_DIR, 'user_logs.json')
+BONUSES_FILE = os.path.join(DATA_DIR, 'bonuses.json')
+
+BONUS_PERCENT = 0.05
+BACK_BUTTON_TEXT = '⬅️ Назад'
 
 # Функции загрузки/сохранения с обработкой ошибок
 def load_json(file_path, default=None):
@@ -73,6 +83,88 @@ REFERALS = load_json(REFERRALS_FILE)
 ORDERS = load_json(ORDERS_FILE)
 FEEDBACKS = load_json(FEEDBACKS_FILE)
 USER_LOGS = load_json(USER_LOGS_FILE)
+BONUSES = load_json(BONUSES_FILE, {})
+
+def ensure_order_payment_fields(order: dict) -> bool:
+    changed = False
+    if 'payment_state' not in order:
+        order['payment_state'] = 'не оплачен'
+        changed = True
+    if 'prepayment_confirmed' not in order:
+        order['prepayment_confirmed'] = False
+        changed = True
+    if 'full_payment_confirmed' not in order:
+        order['full_payment_confirmed'] = False
+        changed = True
+    if 'prepayment_confirmed_at' not in order:
+        order['prepayment_confirmed_at'] = None
+        changed = True
+    if 'full_payment_confirmed_at' not in order:
+        order['full_payment_confirmed_at'] = None
+        changed = True
+    price = order.get('price', 0)
+    if 'bonus_total' not in order:
+        order['bonus_total'] = int(price * BONUS_PERCENT)
+        changed = True
+    if 'bonus_released_prepaid' not in order:
+        order['bonus_released_prepaid'] = 0
+        changed = True
+    if 'bonus_released_full' not in order:
+        order['bonus_released_full'] = 0
+        changed = True
+    return changed
+
+def release_bonus(user_id: str, order: dict, stage: str) -> int:
+    ensure_order_payment_fields(order)
+    user_key = str(user_id)
+    bonus_entry = BONUSES.setdefault(user_key, {'balance': 0, 'history': []})
+    amount = 0
+    if stage == 'prepayment':
+        if order.get('bonus_released_prepaid'):
+            return 0
+        amount = order.get('bonus_total', 0) // 2
+        order['bonus_released_prepaid'] = amount
+    elif stage == 'full':
+        if order.get('bonus_released_full'):
+            return 0
+        already = order.get('bonus_released_prepaid', 0)
+        amount = max(order.get('bonus_total', 0) - already, 0)
+        order['bonus_released_full'] = amount
+    if amount <= 0:
+        return 0
+    bonus_entry['balance'] = bonus_entry.get('balance', 0) + amount
+    history = bonus_entry.setdefault('history', [])
+    history.append({
+        'order_id': order.get('order_id'),
+        'amount': amount,
+        'stage': stage,
+        'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    })
+    return amount
+
+def get_user_bonus_balance(user_id: str) -> int:
+    entry = BONUSES.get(str(user_id), {})
+    return int(entry.get('balance', 0))
+
+def get_pending_bonus(user_id: str) -> int:
+    total = 0
+    changed = False
+    for order in ORDERS.get(str(user_id), []):
+        if ensure_order_payment_fields(order):
+            changed = True
+        credited = order.get('bonus_released_prepaid', 0) + order.get('bonus_released_full', 0)
+        total += max(order.get('bonus_total', 0) - credited, 0)
+    if changed:
+        save_json(ORDERS_FILE, ORDERS)
+    return int(total)
+
+_orders_structure_updated = False
+for _orders_list in ORDERS.values():
+    for _order in _orders_list:
+        if ensure_order_payment_fields(_order):
+            _orders_structure_updated = True
+if _orders_structure_updated:
+    save_json(ORDERS_FILE, ORDERS)
 
 def format_contact_link(contact: str) -> str:
     if not contact:
@@ -97,6 +189,9 @@ def format_contact_link(contact: str) -> str:
     return safe_display
 
 def build_order_details(uid: str, order: dict) -> str:
+    changed = ensure_order_payment_fields(order)
+    if changed:
+        save_json(ORDERS_FILE, ORDERS)
     order_id = order.get('order_id', 'N/A')
     order_name = ORDER_TYPES.get(order.get('type'), {}).get('name', order.get('type', 'Неизвестно'))
     user_link = escape(f"tg://user?id={uid}", quote=True)
@@ -107,6 +202,7 @@ def build_order_details(uid: str, order: dict) -> str:
         f"Тема: {escape(order.get('topic', 'Без темы'))}",
         f"Срок: {order.get('deadline_days', 'N/A')} дней",
         f"Статус: {escape(order.get('status', 'неизвестно'))}",
+        f"Оплата: {escape(order.get('payment_state', 'не оплачен'))}",
         f"Контакт: {format_contact_link(order.get('contact'))}",
         f"Требования: {escape(order.get('requirements', 'Нет'))}",
     ]
@@ -116,6 +212,15 @@ def build_order_details(uid: str, order: dict) -> str:
     else:
         lines.append("Допы: нет")
     lines.append(f"Файлов: {len(order.get('attachments') or [])}")
+    bonus_total = order.get('bonus_total', 0)
+    if bonus_total:
+        lines.append(
+            f"Бонусы: всего {bonus_total} ₽ | предоплата {order.get('bonus_released_prepaid', 0)} ₽ | оплата {order.get('bonus_released_full', 0)} ₽"
+        )
+    if order.get('prepayment_confirmed_at'):
+        lines.append(f"Предоплата подтверждена: {escape(order['prepayment_confirmed_at'])}")
+    if order.get('full_payment_confirmed_at'):
+        lines.append(f"Оплата подтверждена: {escape(order['full_payment_confirmed_at'])}")
     if order.get('created_at'):
         lines.append(f"Создан: {escape(order['created_at'])}")
     return '<br>'.join(lines)
@@ -196,6 +301,82 @@ async def answer_callback(query):
             logger.debug("Callback уже обработан: %s", exc)
         else:
             raise
+
+async def ask_for_topic(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback: bool = False):
+    topic = context.user_data.get('topic')
+    text_lines = ["Введите тему заказа."]
+    if topic:
+        text_lines.append(f"Текущая тема: {topic}")
+    text_lines.append(
+        f"Чтобы вернуться к выбору типа, используйте кнопку \"{BACK_BUTTON_TEXT}\" или команду /back."
+    )
+    markup = ReplyKeyboardMarkup([[BACK_BUTTON_TEXT]], resize_keyboard=True, one_time_keyboard=True)
+    message_text = '\n'.join(text_lines)
+    if via_callback:
+        chat_id = update.effective_chat.id
+        await context.bot.send_message(chat_id, message_text, reply_markup=markup)
+    else:
+        await update.message.reply_text(message_text, reply_markup=markup)
+    return INPUT_TOPIC
+
+async def show_deadline_options(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback: bool = False):
+    today = datetime.now()
+    days_left = context.user_data.get('days_left')
+    text = "Выберите срок сдачи (дольше = дешевле + бонус!):"
+    if days_left:
+        text += f"\nТекущий выбранный срок: {days_left} дней."
+    keyboard = []
+    for i in range(1, 31, 5):
+        row = []
+        for j in range(i, min(i + 5, 31)):
+            date = today + timedelta(days=j)
+            button_text = f"{date.day} {date.strftime('%b')} ({j} дней)"
+            row.append(InlineKeyboardButton(button_text, callback_data=f'deadline_{j}'))
+        keyboard.append(row)
+    keyboard.append([InlineKeyboardButton(BACK_BUTTON_TEXT, callback_data='back_topic')])
+    markup = InlineKeyboardMarkup(keyboard)
+    if via_callback:
+        await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)
+    else:
+        await update.message.reply_text(text, reply_markup=markup)
+    return SELECT_DEADLINE
+
+async def prompt_requirements_input(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback: bool = False):
+    requirements = context.user_data.get('requirements')
+    lines = ["Введите дополнительные требования (или /skip)."]
+    if requirements and requirements not in ('Нет', ''):
+        lines.append(f"Текущие требования: {requirements}")
+    lines.append(
+        f"Чтобы вернуться к выбору срока, используйте кнопку \"{BACK_BUTTON_TEXT}\" или команду /back."
+    )
+    markup = ReplyKeyboardMarkup([[BACK_BUTTON_TEXT]], resize_keyboard=True, one_time_keyboard=True)
+    text = '\n'.join(lines)
+    if via_callback:
+        await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)
+    else:
+        await update.message.reply_text(text, reply_markup=markup)
+    return INPUT_REQUIREMENTS
+
+async def prompt_contact_input(update: Update, context: ContextTypes.DEFAULT_TYPE, via_callback: bool = False):
+    prompt_lines = [
+        "Укажите контакт, куда менеджеру написать (Telegram, ВКонтакте, почта). Это обязательное поле."
+    ]
+    current_contact = context.user_data.get('current_contact')
+    last_contact = context.user_data.get('last_contact')
+    if current_contact:
+        prompt_lines.append(f"Текущий контакт: {current_contact}")
+    elif last_contact:
+        prompt_lines.append(f"Последний указанный контакт: {last_contact}")
+    prompt_lines.append(
+        f"Чтобы вернуться к файлам, используйте кнопку \"{BACK_BUTTON_TEXT}\" или команду /back."
+    )
+    markup = ReplyKeyboardMarkup([[BACK_BUTTON_TEXT]], resize_keyboard=True, one_time_keyboard=True)
+    text = '\n'.join(prompt_lines)
+    if via_callback:
+        await context.bot.send_message(update.effective_chat.id, text, reply_markup=markup)
+    else:
+        await update.message.reply_text(text, reply_markup=markup)
+    return INPUT_CONTACT
 
 # Расчет цены
 def calculate_price(order_type_key, days_left, complexity_factor=1.0):
@@ -304,13 +485,16 @@ async def select_order_type(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [[InlineKeyboardButton(f"{val['icon']} {val['name']}", callback_data=f'type_{key}')] for key, val in ORDER_TYPES.items()]
     keyboard.append([InlineKeyboardButton("⬅️ Меню", callback_data='back_to_main')])
     reply_markup = InlineKeyboardMarkup(keyboard)
-    try:
-        await query.edit_message_text(text, reply_markup=reply_markup)
-    except TelegramError as e:
-        if "message is not modified" in str(e).lower():
-            pass
-        else:
-            raise
+    if query:
+        try:
+            await query.edit_message_text(text, reply_markup=reply_markup)
+        except TelegramError as e:
+            if "message is not modified" in str(e).lower():
+                pass
+            else:
+                raise
+    else:
+        await update.message.reply_text(text, reply_markup=reply_markup)
     return SELECT_ORDER_TYPE
 
 # Подробности о типе заказа
@@ -321,8 +505,8 @@ async def view_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data.startswith('order_'):
         key = data[6:]
         context.user_data['current_order_type'] = key
-        await query.edit_message_text("Введите тему:")
-        return INPUT_TOPIC
+        await query.edit_message_text("Отлично! Теперь введите тему ниже.")
+        return await ask_for_topic(update, context, via_callback=True)
     elif data == 'select_order_type':
         return await select_order_type(update, context)
     elif data.startswith('type_'):
@@ -341,22 +525,18 @@ async def view_order_details(update: Update, context: ContextTypes.DEFAULT_TYPE)
 
 # Ввод темы
 async def input_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['topic'] = update.message.text
+    message_text = update.message.text.strip()
+    if message_text == BACK_BUTTON_TEXT:
+        await update.message.reply_text("Возвращаемся к выбору типа.", reply_markup=ReplyKeyboardRemove())
+        return await select_order_type(update, context)
+    if not context.user_data.get('current_order_type'):
+        await update.message.reply_text("Пожалуйста, выберите тип работы сначала.", reply_markup=ReplyKeyboardRemove())
+        return await select_order_type(update, context)
+    context.user_data['topic'] = message_text
     user = update.effective_user
-    log_user_action(user.id, user.username, f"Тема: {update.message.text}")
-    text = "Выберите срок сдачи (дольше = дешевле + бонус!):"
-    today = datetime.now()
-    keyboard = []
-    for i in range(1, 31, 5):  
-        row = []
-        for j in range(i, min(i+5, 31)):
-            date = today + timedelta(days=j)
-            button_text = f"{date.day} {date.strftime('%b')} ({j} дней)"
-            row.append(InlineKeyboardButton(button_text, callback_data=f'deadline_{j}'))
-        keyboard.append(row)
-    keyboard.append([InlineKeyboardButton("Назад", callback_data=f'type_{context.user_data["current_order_type"]}')])
-    await update.message.reply_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
-    return SELECT_DEADLINE
+    log_user_action(user.id, user.username, f"Тема: {message_text}")
+    await update.message.reply_text("Тема сохранена.", reply_markup=ReplyKeyboardRemove())
+    return await show_deadline_options(update, context)
 
 # Выбор срока
 async def select_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -366,34 +546,57 @@ async def select_deadline(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if data.startswith('deadline_'):
         days = int(data[9:])
         context.user_data['days_left'] = days
-        await query.edit_message_text("Введите дополнительные требования (или /skip):")
-        return INPUT_REQUIREMENTS
+        await query.edit_message_text(f"Срок {days} дней выбран. Уточните требования.")
+        return await prompt_requirements_input(update, context, via_callback=True)
+    elif data == 'back_topic':
+        await query.edit_message_text("Возвращаемся к вводу темы.")
+        return await ask_for_topic(update, context, via_callback=True)
     elif data.startswith('type_'):
         return await view_order_details(update, context)
     return SELECT_DEADLINE
 
 # Ввод требований
 async def input_requirements(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['requirements'] = update.message.text
+    message_text = update.message.text.strip()
+    if message_text == BACK_BUTTON_TEXT:
+        await update.message.reply_text("Возвращаемся к выбору срока.", reply_markup=ReplyKeyboardRemove())
+        return await show_deadline_options(update, context)
+    context.user_data['requirements'] = message_text
+    await update.message.reply_text("Требования сохранены.", reply_markup=ReplyKeyboardRemove())
     return await prompt_file_upload(update, context)
 
 async def skip_requirements(update: Update, context: ContextTypes.DEFAULT_TYPE):
     context.user_data['requirements'] = 'Нет'
+    await update.message.reply_text("Требования пропущены.", reply_markup=ReplyKeyboardRemove())
     return await prompt_file_upload(update, context)
 
-async def prompt_file_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data['current_files'] = []
-    context.user_data.pop('current_contact', None)
-    text = (
-        "Прикрепите файлы для заказа (если они есть). Отправьте все документы подряд.\n"
-        "Когда закончите, нажмите /done. Если файлов нет, нажмите /skip."
-    )
-    if update.message:
-        await update.message.reply_text(text)
-    elif update.callback_query:
+async def prompt_file_upload(
+    update: Update,
+    context: ContextTypes.DEFAULT_TYPE,
+    via_callback: bool = False,
+    from_back: bool = False
+):
+    if not from_back or 'current_files' not in context.user_data:
+        context.user_data['current_files'] = context.user_data.get('current_files', [])
+    if not from_back:
+        context.user_data.pop('current_contact', None)
+    files_count = len(context.user_data.get('current_files', []))
+    text_lines = [
+        "Прикрепите файлы для заказа (если они есть). Отправьте все документы подряд.",
+        "Когда закончите, нажмите /done. Если файлов нет, нажмите /skip.",
+        "Чтобы вернуться и изменить требования, используйте команду /back."
+    ]
+    if files_count:
+        text_lines.insert(1, f"Уже загружено файлов: {files_count}.")
+    text = '\n'.join(text_lines)
+    if via_callback and update.callback_query:
         query = update.callback_query
         await answer_callback(query)
         await query.edit_message_text(text)
+    elif update.message:
+        await update.message.reply_text(text)
+    else:
+        await context.bot.send_message(update.effective_chat.id, text)
     return UPLOAD_FILES
 
 async def handle_document_upload(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -423,6 +626,9 @@ async def handle_photo_upload(update: Update, context: ContextTypes.DEFAULT_TYPE
     return UPLOAD_FILES
 
 async def files_text_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    message_text = update.message.text.strip()
+    if message_text == BACK_BUTTON_TEXT:
+        return await back_from_files(update, context)
     await update.message.reply_text(
         "Пожалуйста, прикрепите файл или используйте /done, когда закончите. Если файлов нет, нажмите /skip."
     )
@@ -441,36 +647,51 @@ async def finish_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
     return await request_contact(update, context)
 
 async def request_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    context.user_data.pop('current_contact', None)
-    prompt = (
-        "Укажите контакт, куда менеджеру написать (Telegram, ВКонтакте, почта). Это обязательное поле."
-    )
-    last_contact = context.user_data.get('last_contact')
-    if last_contact:
-        prompt += f"\nРанее вы указывали: {last_contact}. Можно отправить его снова или написать другой."
-    if update.message:
-        await update.message.reply_text(prompt)
-    elif update.callback_query:
+    if update.callback_query:
         query = update.callback_query
         await answer_callback(query)
-        await query.edit_message_text(prompt)
-    return INPUT_CONTACT
+        return await prompt_contact_input(update, context, via_callback=True)
+    return await prompt_contact_input(update, context)
 
 async def input_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
     contact = update.message.text.strip()
+    if contact == BACK_BUTTON_TEXT:
+        await update.message.reply_text("Возвращаемся к файлам.", reply_markup=ReplyKeyboardRemove())
+        return await prompt_file_upload(update, context, from_back=True)
     if not contact:
         await update.message.reply_text("Контакт обязателен. Пожалуйста, укажите, куда менеджеру написать.")
         return INPUT_CONTACT
     context.user_data['current_contact'] = contact
     context.user_data['last_contact'] = contact
+    await update.message.reply_text("Контакт сохранен.", reply_markup=ReplyKeyboardRemove())
     return await add_upsell(update, context)
+
+async def back_from_topic(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Возвращаемся к выбору типа.", reply_markup=ReplyKeyboardRemove())
+    return await select_order_type(update, context)
+
+async def back_from_requirements(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Возвращаемся к выбору срока.", reply_markup=ReplyKeyboardRemove())
+    return await show_deadline_options(update, context)
+
+async def back_from_files(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Возвращаемся к требованиям.")
+    return await prompt_requirements_input(update, context)
+
+async def back_from_contact(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("Возвращаемся к файлам.", reply_markup=ReplyKeyboardRemove())
+    return await prompt_file_upload(update, context, from_back=True)
 
 # Добавление допуслуг
 async def add_upsell(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    text = "Добавить услуги? (Клиенты, добавляющие, получают 5% скидки на следующий заказ!)"
+    text = (
+        "Добавить услуги? (Клиенты, добавляющие, получают 5% скидки на следующий заказ!)\n"
+        f"Чтобы вернуться и изменить контакт, используйте кнопку \"{BACK_BUTTON_TEXT}\"."
+    )
     keyboard = [
         [InlineKeyboardButton("Презентация (+2000₽)", callback_data='add_prez')],
         [InlineKeyboardButton("Речь (+1000₽)", callback_data='add_speech')],
+        [InlineKeyboardButton(BACK_BUTTON_TEXT, callback_data='back_contact')],
         [InlineKeyboardButton("Без допов", callback_data='no_upsell')]
     ]
     if update.message:
@@ -496,6 +717,9 @@ async def upsell_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if 'speech' not in upsells:
             upsells.add('speech')
             added = True
+    elif data == 'back_contact':
+        await query.edit_message_text("Возвращаемся к контактам.")
+        return await request_contact(update, context)
     elif data == 'no_upsell':
         return await process_order(update, context)
     text = "Добавить еще? (Полный пакет экономит время!)" if added else "Уже добавлено. Добавить еще?"
@@ -538,6 +762,7 @@ async def process_order(update: Update, context: ContextTypes.DEFAULT_TYPE):
         'contact': contact,
         'created_at': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
     }
+    ensure_order_payment_fields(order)
     context.user_data.setdefault('cart', []).append(order)
     context.user_data.pop('upsells', None)
     context.user_data.pop('requirements', None)
@@ -810,7 +1035,22 @@ async def show_profile(update: Update, context: ContextTypes.DEFAULT_TYPE):
     feedbacks_count = len(FEEDBACKS.get(user_id, []))
     refs_count = len(REFERALS.get(user_id, []))
     ref_link = context.user_data.get('ref_link', 'Нет ссылки')
-    text = f"👤 Профиль {user.first_name}\n\nЗаказов: {orders_count}\nОтзывов: {feedbacks_count}\nРефералов: {refs_count}\nРеф. ссылка: {ref_link}\n\nПриглашайте друзей за бонусы!"
+    bonus_balance = get_user_bonus_balance(user_id)
+    pending_bonus = get_pending_bonus(user_id)
+    profile_lines = [
+        f"👤 Профиль {user.first_name}",
+        "",
+        f"Заказов: {orders_count}",
+        f"Отзывов: {feedbacks_count}",
+        f"Рефералов: {refs_count}",
+        f"Бонусы: {bonus_balance} ₽"
+    ]
+    if pending_bonus:
+        profile_lines.append(f"Ожидает зачисления после подтверждения оплаты: {pending_bonus} ₽")
+    profile_lines.append(f"Реф. ссылка: {ref_link}")
+    profile_lines.append("")
+    profile_lines.append("Приглашайте друзей за бонусы!")
+    text = '\n'.join(profile_lines)
     keyboard = [
         [InlineKeyboardButton("📋 Мои заказы", callback_data='my_orders')],
         [InlineKeyboardButton("⭐ Оставить отзыв", callback_data='leave_feedback')],
@@ -832,9 +1072,15 @@ async def show_orders(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = "Пока нет заказов. Сделайте заказ сейчас!"
     else:
         text = "Ваши заказы:\n"
+        changed = False
         for order in user_orders:
             name = ORDER_TYPES.get(order.get('type'), {}).get('name', 'Неизвестно')
-            text += f"#{order.get('order_id', 'N/A')}: {name} - {order.get('status', 'новый')}\n"
+            if ensure_order_payment_fields(order):
+                changed = True
+            payment_state = order.get('payment_state', 'не оплачен')
+            text += f"#{order.get('order_id', 'N/A')}: {name} - {order.get('status', 'новый')} | Оплата: {payment_state}\n"
+        if changed:
+            save_json(ORDERS_FILE, ORDERS)
     keyboard = [[InlineKeyboardButton("Назад", callback_data='profile')]]
     await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
     return SHOW_ORDERS
@@ -898,6 +1144,22 @@ async def admin_start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     log_user_action(user.id, user.username, "Админ-панель")
     return await show_admin_menu(update, context)
 
+def build_admin_order_keyboard(uid: str, order_id_str: str, order: dict) -> InlineKeyboardMarkup:
+    buttons = []
+    if not order.get('prepayment_confirmed'):
+        buttons.append([
+            InlineKeyboardButton("Подтвердить предоплату", callback_data=f'admin_confirm_prepay|{uid}|{order_id_str}')
+        ])
+    if not order.get('full_payment_confirmed'):
+        buttons.append([
+            InlineKeyboardButton("Подтвердить оплату", callback_data=f'admin_confirm_full|{uid}|{order_id_str}')
+        ])
+    buttons.append([InlineKeyboardButton("Отменить заказ", callback_data=f'admin_cancel|{uid}|{order_id_str}')])
+    buttons.append([InlineKeyboardButton("Удалить заказ", callback_data=f'admin_delete|{uid}|{order_id_str}')])
+    buttons.append([InlineKeyboardButton("👤 Открыть профиль", url=f"tg://user?id={uid}")])
+    buttons.append([InlineKeyboardButton("⬅️ К списку", callback_data='admin_orders')])
+    return InlineKeyboardMarkup(buttons)
+
 # Обработчик админ-меню
 async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
@@ -919,21 +1181,33 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
     if data == 'admin_orders':
         text_lines = []
         buttons = []
+        updated = False
         for uid, ords in ORDERS.items():
             for ord_data in ords:
-                text_lines.append(f"#{ord_data.get('order_id', 'N/A')} от {uid}: {ord_data.get('status', 'новый')}")
+                if ensure_order_payment_fields(ord_data):
+                    updated = True
+                order_id = ord_data.get('order_id', 'N/A')
+                status = escape(ord_data.get('status', 'новый'))
+                payment_state = escape(ord_data.get('payment_state', 'не оплачен'))
+                user_href = escape(f"tg://user?id={uid}", quote=True)
+                text_lines.append(
+                    f"#{order_id}: {status} | Оплата: {payment_state} — <a href=\"{user_href}\">{escape(str(uid))}</a>"
+                )
                 buttons.append([
                     InlineKeyboardButton(
-                        f"#{ord_data.get('order_id', 'N/A')} ({uid})",
-                        callback_data=f"admin_order|{uid}|{ord_data.get('order_id', 'N/A')}"
-                    )
+                        f"#{order_id} ({uid})",
+                        callback_data=f"admin_order|{uid}|{order_id}"
+                    ),
+                    InlineKeyboardButton("👤", url=f"tg://user?id={uid}")
                 ])
+        if updated:
+            save_json(ORDERS_FILE, ORDERS)
         if not text_lines:
             text = "Заказы отсутствуют."
         else:
             text = "📋 Заказы:\n" + "\n".join(text_lines[:20])
         buttons.append([InlineKeyboardButton("Назад", callback_data='admin_menu')])
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons))
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
         return ADMIN_MENU
     if data.startswith('admin_order|'):
         try:
@@ -946,12 +1220,83 @@ async def admin_menu_handler(update: Update, context: ContextTypes.DEFAULT_TYPE)
             await query.edit_message_text("Заказ не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data='admin_orders')]]))
             return ADMIN_MENU
         text = build_order_details(uid, order)
-        keyboard = [
-            [InlineKeyboardButton("Отменить заказ", callback_data=f'admin_cancel|{uid}|{order_id_str}')],
-            [InlineKeyboardButton("Удалить заказ", callback_data=f'admin_delete|{uid}|{order_id_str}')],
-            [InlineKeyboardButton("⬅️ К списку", callback_data='admin_orders')]
-        ]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode=ParseMode.HTML)
+        reply_markup = build_admin_order_keyboard(uid, order_id_str, order)
+        await query.edit_message_text(text, reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        return ADMIN_MENU
+    if data.startswith('admin_confirm_prepay|'):
+        try:
+            _, uid, order_id_str = data.split('|', 2)
+        except ValueError:
+            await query.edit_message_text("Некорректный идентификатор заказа.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data='admin_orders')]]))
+            return ADMIN_MENU
+        order = next((o for o in ORDERS.get(uid, []) if str(o.get('order_id')) == order_id_str), None)
+        if not order:
+            await query.edit_message_text("Заказ не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data='admin_orders')]]))
+            return ADMIN_MENU
+        changed = ensure_order_payment_fields(order)
+        if order.get('prepayment_confirmed'):
+            if changed:
+                save_json(ORDERS_FILE, ORDERS)
+            info_prefix = "<b>ℹ️ Предоплата уже подтверждена.</b>"
+        else:
+            order['prepayment_confirmed'] = True
+            order['prepayment_confirmed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            if not order.get('full_payment_confirmed'):
+                order['payment_state'] = 'предоплата подтверждена'
+            credited = release_bonus(uid, order, 'prepayment')
+            save_json(ORDERS_FILE, ORDERS)
+            save_json(BONUSES_FILE, BONUSES)
+            info_prefix = "<b>✅ Предоплата подтверждена.</b>"
+            try:
+                balance = get_user_bonus_balance(uid)
+                credited_text = f"Начислено бонусов: {credited} ₽." if credited else "Бонусы будут начислены после полной оплаты."
+                message_text = (
+                    f"Ваша предоплата по заказу #{order.get('order_id')} подтверждена. {credited_text}\n"
+                    f"Текущий баланс бонусов: {balance} ₽."
+                )
+                await context.bot.send_message(int(uid), message_text)
+            except (TelegramError, ValueError) as exc:
+                logger.warning("Не удалось уведомить пользователя %s о предоплате: %s", uid, exc)
+        text = build_order_details(uid, order)
+        reply_markup = build_admin_order_keyboard(uid, order_id_str, order)
+        await query.edit_message_text(f"{info_prefix}<br><br>{text}", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
+        return ADMIN_MENU
+    if data.startswith('admin_confirm_full|'):
+        try:
+            _, uid, order_id_str = data.split('|', 2)
+        except ValueError:
+            await query.edit_message_text("Некорректный идентификатор заказа.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data='admin_orders')]]))
+            return ADMIN_MENU
+        order = next((o for o in ORDERS.get(uid, []) if str(o.get('order_id')) == order_id_str), None)
+        if not order:
+            await query.edit_message_text("Заказ не найден.", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("Назад", callback_data='admin_orders')]]))
+            return ADMIN_MENU
+        changed = ensure_order_payment_fields(order)
+        if order.get('full_payment_confirmed'):
+            if changed:
+                save_json(ORDERS_FILE, ORDERS)
+            info_prefix = "<b>ℹ️ Полная оплата уже подтверждена.</b>"
+        else:
+            order['full_payment_confirmed'] = True
+            order['full_payment_confirmed_at'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+            order['payment_state'] = 'оплачен'
+            credited = release_bonus(uid, order, 'full')
+            save_json(ORDERS_FILE, ORDERS)
+            save_json(BONUSES_FILE, BONUSES)
+            info_prefix = "<b>✅ Оплата подтверждена.</b>"
+            try:
+                balance = get_user_bonus_balance(uid)
+                credited_text = f"Начислено бонусов: {credited} ₽." if credited else "Дополнительные бонусы не начислены."
+                message_text = (
+                    f"Полная оплата по заказу #{order.get('order_id')} подтверждена. {credited_text}\n"
+                    f"Текущий баланс бонусов: {balance} ₽."
+                )
+                await context.bot.send_message(int(uid), message_text)
+            except (TelegramError, ValueError) as exc:
+                logger.warning("Не удалось уведомить пользователя %s об оплате: %s", uid, exc)
+        text = build_order_details(uid, order)
+        reply_markup = build_admin_order_keyboard(uid, order_id_str, order)
+        await query.edit_message_text(f"{info_prefix}<br><br>{text}", reply_markup=reply_markup, parse_mode=ParseMode.HTML)
         return ADMIN_MENU
     if data.startswith('admin_cancel|'):
         try:
@@ -1037,17 +1382,28 @@ def main():
             SELECT_MAIN_MENU: [CallbackQueryHandler(main_menu_handler)],
             SELECT_ORDER_TYPE: [CallbackQueryHandler(select_order_type)],
             VIEW_ORDER_DETAILS: [CallbackQueryHandler(view_order_details)],
-            INPUT_TOPIC: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_topic)],
+            INPUT_TOPIC: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, input_topic),
+                CommandHandler('back', back_from_topic)
+            ],
             SELECT_DEADLINE: [CallbackQueryHandler(select_deadline)],
-            INPUT_REQUIREMENTS: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_requirements), CommandHandler('skip', skip_requirements)],
+            INPUT_REQUIREMENTS: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, input_requirements),
+                CommandHandler('skip', skip_requirements),
+                CommandHandler('back', back_from_requirements)
+            ],
             UPLOAD_FILES: [
                 MessageHandler(filters.Document.ALL, handle_document_upload),
                 MessageHandler(filters.PHOTO, handle_photo_upload),
                 MessageHandler(filters.TEXT & ~filters.COMMAND, files_text_reminder),
                 CommandHandler('skip', skip_files),
-                CommandHandler('done', finish_files)
+                CommandHandler('done', finish_files),
+                CommandHandler('back', back_from_files)
             ],
-            INPUT_CONTACT: [MessageHandler(filters.TEXT & ~filters.COMMAND, input_contact)],
+            INPUT_CONTACT: [
+                MessageHandler(filters.TEXT & ~filters.COMMAND, input_contact),
+                CommandHandler('back', back_from_contact)
+            ],
             ADD_UPSSELL: [CallbackQueryHandler(upsell_handler)],
             ADD_ANOTHER_ORDER: [CallbackQueryHandler(add_another_handler)],
             CONFIRM_CART: [CallbackQueryHandler(confirm_cart_handler)],
