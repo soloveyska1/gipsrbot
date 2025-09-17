@@ -20,7 +20,11 @@ from telegram.ext import (
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
 from dotenv import load_dotenv
-import pandas as pd
+
+try:  # pragma: no cover - окружения без pandas должны работать
+    import pandas as pd  # type: ignore[import-untyped]
+except ModuleNotFoundError:  # pragma: no cover - обработка отсутствующей зависимости
+    pd = None  # type: ignore[assignment]
 
 # Загрузка переменных окружения
 load_dotenv()
@@ -43,6 +47,9 @@ logger = logging.getLogger(__name__)
 file_handler = logging.FileHandler(os.path.join(LOGS_DIR, 'bot.log'))
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
+
+if pd is None:
+    logger.warning('Библиотека pandas не найдена, CSV-экспорт будет отключен.')
 
 # Файлы данных
 PRICES_FILE = os.path.join(DATA_DIR, 'prices.json')
@@ -1662,6 +1669,8 @@ async def process_admin_export_action(update: Update, context: ContextTypes.DEFA
     chat_id = query.message.chat_id if query.message else ADMIN_CHAT_ID
     if data == 'admin_export':
         lines = ['<b>Экспорт данных</b>', 'Выберите формат выгрузки.']
+        if pd is None:
+            lines.append('⚠️ Установите пакет pandas, чтобы включить экспорт в CSV.')
         buttons = [
             [InlineKeyboardButton('📄 CSV заказы', callback_data='admin_export_csv')],
             [InlineKeyboardButton('📁 JSON заказы', callback_data='admin_export_json')],
@@ -1672,6 +1681,9 @@ async def process_admin_export_action(update: Update, context: ContextTypes.DEFA
         await query.edit_message_text('<br>'.join(lines), reply_markup=InlineKeyboardMarkup(buttons), parse_mode=ParseMode.HTML)
         return True
     if data == 'admin_export_csv':
+        if pd is None:
+            await query.answer('CSV экспорт недоступен: pandas не установлен.', show_alert=True)
+            return True
         rows = [{'user_id': uid, **order} for uid, orders in ORDERS.items() for order in orders]
         if not rows:
             await query.answer('Нет данных для экспорта.', show_alert=True)
@@ -1694,6 +1706,9 @@ async def process_admin_export_action(update: Update, context: ContextTypes.DEFA
         await query.answer('JSON выгружен.')
         return True
     if data == 'admin_export_bonuses':
+        if pd is None:
+            await query.answer('CSV экспорт недоступен: pandas не установлен.', show_alert=True)
+            return True
         rows = []
         for uid, info in BONUSES.items():
             rows.append({'user_id': uid, 'balance': info.get('balance', 0), 'operations': len(info.get('history', []))})
