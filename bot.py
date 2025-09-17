@@ -64,7 +64,16 @@ def save_json(file_path, data):
     except Exception as e:
         logger.error(f"Ошибка сохранения {file_path}: {e}")
 
-# Глобальные данные
+# Глобальные данные (инициализируются позже через initialize_storage)
+PRICES = {}
+REFERALS = {}
+ORDERS = {}
+FEEDBACKS = {}
+BONUSES = {}
+USER_LOGS = {}
+USERS = {}
+
+# Глобальные данные по умолчанию
 DEFAULT_PRICES = {
     'samostoyatelnye': {'base': 2500, 'min': 2500},
     'kursovaya_teoreticheskaya': {'base': 8000, 'min': 8000},
@@ -110,26 +119,7 @@ def normalize_prices(raw_prices):
     return normalized
 
 
-PRICES = normalize_prices(load_json(PRICES_FILE, {}))
-REFERALS = load_json(REFERRALS_FILE)
-ORDERS = load_json(ORDERS_FILE)
-FEEDBACKS = load_json(FEEDBACKS_FILE)
-BONUSES = load_json(BONUSES_FILE)
-USER_LOGS = load_json(USER_LOGS_FILE)
-USERS = load_json(USERS_FILE)
-
-if not isinstance(REFERALS, dict):
-    REFERALS = {}
-REFERALS = normalize_referrals_structure(REFERALS)
-if not isinstance(ORDERS, dict):
-    ORDERS = {}
-normalize_orders_storage()
-if not isinstance(BONUSES, dict):
-    BONUSES = {}
-if not isinstance(USER_LOGS, dict):
-    USER_LOGS = {}
-if not isinstance(USERS, dict):
-    USERS = {}
+# Инициализация данных выполняется после определения вспомогательных функций
 
 ORDER_TYPES = {
     'samostoyatelnye': {
@@ -540,6 +530,42 @@ def normalize_orders_storage() -> None:
         changed = True
     if changed:
         save_json(ORDERS_FILE, ORDERS)
+
+
+def initialize_storage() -> None:
+    global PRICES, REFERALS, ORDERS, FEEDBACKS, BONUSES, USER_LOGS, USERS
+
+    PRICES = normalize_prices(load_json(PRICES_FILE, {}))
+
+    REFERALS = load_json(REFERRALS_FILE)
+    if not isinstance(REFERALS, dict):
+        REFERALS = {}
+    REFERALS = normalize_referrals_structure(REFERALS)
+
+    ORDERS = load_json(ORDERS_FILE)
+    if not isinstance(ORDERS, dict):
+        ORDERS = {}
+
+    FEEDBACKS = load_json(FEEDBACKS_FILE)
+    if not isinstance(FEEDBACKS, dict):
+        FEEDBACKS = {}
+
+    BONUSES = load_json(BONUSES_FILE)
+    if not isinstance(BONUSES, dict):
+        BONUSES = {}
+
+    USER_LOGS = load_json(USER_LOGS_FILE)
+    if not isinstance(USER_LOGS, dict):
+        USER_LOGS = {}
+
+    USERS = load_json(USERS_FILE)
+    if not isinstance(USERS, dict):
+        USERS = {}
+
+    normalize_orders_storage()
+
+
+initialize_storage()
 
 FAQ_ITEMS = [
     {'question': 'Как сделать заказ?', 'answer': 'Выберите "Сделать заказ" и следуйте шагам. Можно заказать несколько работ сразу!'},
