@@ -13,12 +13,14 @@ from telegram.ext import (
 )
 from telegram.constants import ParseMode
 from telegram.error import TelegramError
+from telegram.helpers import escape_markdown
 from dotenv import load_dotenv
 
 # Загрузка переменных окружения
 load_dotenv()
 TELEGRAM_BOT_TOKEN = os.getenv('TELEGRAM_BOT_TOKEN')
-ADMIN_CHAT_ID = int(os.getenv('ADMIN_CHAT_ID', 0))
+ADMIN_CHAT_ID_RAW = (os.getenv('ADMIN_CHAT_ID', '') or '').strip()
+ADMIN_CHAT_ID = 0  # будет проинициализирован после настройки логирования
 
 # Директории
 BASE_DIR = os.path.join(os.getcwd(), 'clients')
@@ -36,6 +38,12 @@ logger = logging.getLogger(__name__)
 file_handler = logging.FileHandler(os.path.join(LOGS_DIR, 'bot.log'))
 file_handler.setFormatter(logging.Formatter('%(asctime)s - %(name)s - %(levelname)s - %(message)s'))
 logger.addHandler(file_handler)
+
+try:
+    ADMIN_CHAT_ID = int(ADMIN_CHAT_ID_RAW) if ADMIN_CHAT_ID_RAW else 0
+except (TypeError, ValueError):
+    ADMIN_CHAT_ID = 0
+    logger.warning("Некорректное значение ADMIN_CHAT_ID='%s'. Уведомления администратору отключены.", ADMIN_CHAT_ID_RAW)
 
 # Файлы данных
 PRICES_FILE = os.path.join(DATA_DIR, 'prices.json')
@@ -1106,11 +1114,25 @@ async def error_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 # Команда /start
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user = update.effective_user
+    message = update.effective_message
     log_user_action(user.id, user.username, "/start", user.full_name)
-    args = update.message.text.split()
-    bot_username = (await context.bot.get_me()).username
-    ref_link = f"https://t.me/{bot_username}?start={user.id}"
-    context.user_data['ref_link'] = ref_link
+    text = message.text if message and message.text else ""
+    args = text.split() if text else []
+
+    bot_username = context.bot.username
+    if not bot_username:
+        try:
+            bot_username = (await context.bot.get_me()).username
+        except TelegramError as exc:
+            logger.warning("Не удалось получить информацию о боте: %s", exc)
+            bot_username = None
+
+    ref_link = None
+    if bot_username:
+        ref_link = f"https://t.me/{bot_username}?start={user.id}"
+        context.user_data['ref_link'] = ref_link
+    else:
+        context.user_data.pop('ref_link', None)
     if len(args) > 1 and args[1].lstrip('-').isdigit():
         referrer_id = int(args[1])
         if referrer_id != user.id:
@@ -1120,10 +1142,14 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 await context.bot.send_message(referrer_id, f"🎉 Новый реферал: {user.first_name}")
             except TelegramError as exc:
                 logger.warning(f"Не удалось уведомить реферера {referrer_id}: {exc}")
+    safe_name = escape_markdown(user.first_name or user.full_name or 'друг', version=1)
     welcome = (
-        f"👋 Добро пожаловать, {user.first_name}! Работаем со всеми дисциплинами, кроме технических (чертежи)."
-        f" Уже 5000+ клиентов и 10% скидка на первый заказ 🔥\nПоделитесь ссылкой для бонусов: {ref_link}"
+        f"👋 Добро пожаловать, {safe_name}! Работаем со всеми дисциплинами, кроме технических (чертежи)."
+        " Уже 5000+ клиентов и 10% скидка на первый заказ 🔥"
     )
+    if ref_link:
+        safe_link = escape_markdown(ref_link, version=1)
+        welcome += f"\nПоделитесь ссылкой для бонусов: {safe_link}"
     return await main_menu(update, context, welcome)
 
 # Главное меню
@@ -1147,9 +1173,16 @@ async def main_menu(update: Update, context: ContextTypes.DEFAULT_TYPE, message=
             if "message is not modified" in str(e).lower():
                 pass
             else:
-                logger.error(f"Ошибка редактирования сообщения: {e}")
+                logger.warning("Не удалось применить Markdown к сообщению меню: %s", e)
+                await query.edit_message_text(text, reply_markup=reply_markup)
     else:
-        await update.message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+        target_message = update.effective_message
+        if target_message:
+            try:
+                await target_message.reply_text(text, reply_markup=reply_markup, parse_mode=ParseMode.MARKDOWN)
+            except TelegramError as e:
+                logger.warning("Не удалось отправить главное меню с Markdown: %s", e)
+                await target_message.reply_text(text, reply_markup=reply_markup)
     return SELECT_MAIN_MENU
 
 # Обработчик главного меню
