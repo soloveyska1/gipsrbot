@@ -3424,6 +3424,7 @@ def main():
             "Не задан TELEGRAM_BOT_TOKEN. Укажите токен бота в файле .env перед запуском."
         )
         raise SystemExit(1)
+    logger.info("Запускаю бота. Ожидаю команды от Telegram...")
     application = ApplicationBuilder().token(TELEGRAM_BOT_TOKEN).build()
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler('start', start), CommandHandler('admin', admin_start)],

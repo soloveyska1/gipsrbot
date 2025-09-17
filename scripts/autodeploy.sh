@@ -48,6 +48,32 @@ read_env_value() {
 import sys
 from pathlib import Path
 
+
+def strip_inline_comment(raw: str) -> str:
+    result = []
+    in_single = False
+    in_double = False
+    for ch in raw:
+        if ch == "'" and not in_double:
+            in_single = not in_single
+            result.append(ch)
+            continue
+        if ch == '"' and not in_single:
+            in_double = not in_double
+            result.append(ch)
+            continue
+        if ch == "#" and not in_single and not in_double:
+            break
+        result.append(ch)
+    return "".join(result).strip()
+
+
+def unquote(value: str) -> str:
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in "'\"":
+        return value[1:-1]
+    return value
+
+
 key = sys.argv[1]
 path = Path(sys.argv[2])
 value = ""
@@ -63,15 +89,9 @@ if path.exists():
         current_key, current_value = line.split("=", 1)
         if current_key.strip() != key:
             continue
-        current_value = current_value.strip()
-        if (
-            current_value
-            and current_value[0] == current_value[-1]
-            and current_value[0] in "'\""
-        ):
-            current_value = current_value[1:-1]
+        current_value = strip_inline_comment(current_value).strip()
+        current_value = unquote(current_value.strip())
         value = current_value.strip()
-        break
 print(value)
 PY
 }
@@ -137,6 +157,13 @@ if [[ -z "$bot_token" ]]; then
     log "TELEGRAM_BOT_TOKEN is missing or empty in $ENV_FILE. Skipping bot restart."
     exit 0
 fi
+
+if [[ ! "$bot_token" =~ ^[0-9]+:[A-Za-z0-9_-]+$ ]]; then
+    log "TELEGRAM_BOT_TOKEN looks malformed (length ${#bot_token}). Skipping bot restart."
+    exit 0
+fi
+
+log "Detected TELEGRAM_BOT_TOKEN (length ${#bot_token})."
 
 restart_service() {
     local unit="$1"
